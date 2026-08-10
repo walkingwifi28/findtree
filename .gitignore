@@ -1,0 +1,8 @@
+.build/
+dist/
+.DS_Store
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+findtree-ui.png
+.watchtest/

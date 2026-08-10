@@ -1,0 +1,377 @@
+import Foundation
+import AppKit
+import Combine
+import CoreServices
+import FindTreeCore
+
+private final class WeakAppModelBox: @unchecked Sendable {
+    weak var value: AppModel?
+    init(_ value: AppModel) { self.value = value }
+}
+
+@MainActor
+final class AppModel: ObservableObject, @unchecked Sendable {
+    enum DirectorySortMode: String, CaseIterable, Identifiable {
+        case allocated = "Allocated"
+        case logical = "Logical"
+        case name = "Name"
+        case files = "Files"
+
+        var id: String { rawValue }
+    }
+
+    @Published var rootPath: String
+    @Published var currentDirectory: String
+    @Published var snapshot: IndexedScanSnapshot?
+    @Published var directoryFilter = ""
+    @Published var directorySort: DirectorySortMode = .allocated
+    @Published var isScanning = false
+    @Published var isWatching = false
+    @Published var statusMessage = ""
+    @Published var fileQuery = ""
+    @Published var fileResults: [FileUsage] = []
+    @Published var isSearchingFiles = false
+    @Published var lastError: String?
+
+    private let scanner = FastScanner()
+    private let indexStore: ScanIndexStore
+    private let fileStore: FileIndexStore
+    private let syncQueue = DispatchQueue(label: "findtree.app.incremental-sync", qos: .utility)
+    private var watcher: FSEventWatcher?
+    private var childrenByParent: [String: [DirectoryUsage]] = [:]
+    private var usageByPath: [String: DirectoryUsage] = [:]
+
+    init() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        self.rootPath = home
+        self.currentDirectory = home
+
+        let indexURL = Self.defaultIndexURL()
+        self.indexStore = ScanIndexStore(databaseURL: indexURL)
+        self.fileStore = FileIndexStore(databaseURL: indexURL)
+
+        loadCachedSnapshot(startWatcher: true)
+    }
+
+    deinit {
+        watcher?.stop()
+    }
+
+    var rootUsage: DirectoryUsage? {
+        usageByPath[rootPath]
+    }
+
+    var currentUsage: DirectoryUsage? {
+        usageByPath[currentDirectory]
+    }
+
+    var directoryRows: [DirectoryUsage] {
+        var rows = childrenByParent[currentDirectory] ?? []
+        let filter = directoryFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !filter.isEmpty {
+            rows = rows.filter {
+                $0.path.lastPathComponent.localizedCaseInsensitiveContains(filter)
+            }
+        }
+        switch directorySort {
+        case .allocated:
+            rows.sort { $0.allocatedBytes == $1.allocatedBytes ? $0.path < $1.path : $0.allocatedBytes > $1.allocatedBytes }
+        case .logical:
+            rows.sort { $0.logicalBytes == $1.logicalBytes ? $0.path < $1.path : $0.logicalBytes > $1.logicalBytes }
+        case .name:
+            rows.sort { $0.path.lastPathComponent.localizedStandardCompare($1.path.lastPathComponent) == .orderedAscending }
+        case .files:
+            rows.sort { $0.fileCount == $1.fileCount ? $0.path < $1.path : $0.fileCount > $1.fileCount }
+        }
+        return rows
+    }
+
+    var treemapRows: [DirectoryUsage] {
+        Array(directoryRows.filter { $0.allocatedBytes > 0 }.prefix(24))
+    }
+
+    var canNavigateUp: Bool {
+        currentDirectory != rootPath && currentDirectory.hasPrefix(rootPath)
+    }
+
+    func chooseRootFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a folder to analyze"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        setRoot(url.standardizedFileURL.path)
+    }
+
+    func setRoot(_ path: String) {
+        stopWatching()
+        let standardized = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
+        rootPath = standardized
+        currentDirectory = standardized
+        snapshot = nil
+        childrenByParent = [:]
+        usageByPath = [:]
+        fileResults = []
+        fileQuery = ""
+        lastError = nil
+        statusMessage = ""
+        loadCachedSnapshot(startWatcher: true)
+    }
+
+    func scan() {
+        guard !isScanning else { return }
+        stopWatching()
+        isScanning = true
+        lastError = nil
+        statusMessage = "Scanning…"
+
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
+        let scanner = self.scanner
+        let indexStore = self.indexStore
+        let fileStore = self.fileStore
+        let workerCount = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
+        let cursorBeforeScan = UInt64(FSEventsGetCurrentEventId())
+
+        Task {
+            do {
+                let updated = try await Task.detached(priority: .userInitiated) {
+                    let writer = try fileStore.makeFullWriter(rootPath: rootURL.path)
+                    do {
+                        let result = try scanner.scan(
+                            rootURL: rootURL,
+                            options: ScanOptions(
+                                stayOnRootVolume: true,
+                                includeHiddenFiles: true,
+                                workerCount: workerCount
+                            ),
+                            progressEvery: 0,
+                            onFileBatch: { try writer.consume($0) }
+                        )
+                        try writer.finish()
+                        try indexStore.save(result)
+                        try indexStore.saveLastEventID(cursorBeforeScan, rootPath: rootURL.path)
+                        return try indexStore.load(rootPath: rootURL.path)
+                    } catch {
+                        writer.cancel()
+                        throw error
+                    }
+                }.value
+
+                if let updated {
+                    apply(updated)
+                    statusMessage = "Indexed \(updated.result.fileCount.formatted()) files"
+                    startWatching()
+                }
+            } catch {
+                lastError = String(describing: error)
+                statusMessage = "Scan failed"
+            }
+            isScanning = false
+        }
+    }
+
+    func navigate(to directory: DirectoryUsage) {
+        currentDirectory = directory.path
+        directoryFilter = ""
+    }
+
+    func navigateUp() {
+        guard canNavigateUp else { return }
+        let parent = (currentDirectory as NSString).deletingLastPathComponent
+        currentDirectory = PathUtilitiesForApp.clamp(parent, toRoot: rootPath)
+        directoryFilter = ""
+    }
+
+    func goToRoot() {
+        currentDirectory = rootPath
+        directoryFilter = ""
+    }
+
+    func revealCurrentDirectory() {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: currentDirectory)])
+    }
+
+    func reveal(_ file: FileUsage) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
+    }
+
+    func searchFiles() {
+        let query = fileQuery
+        let root = rootPath
+        let fileStore = self.fileStore
+        isSearchingFiles = true
+        lastError = nil
+
+        Task {
+            do {
+                let results = try await Task.detached(priority: .userInitiated) {
+                    try fileStore.search(rootPath: root, query: query, limit: 500)
+                }.value
+                fileResults = results
+            } catch {
+                lastError = String(describing: error)
+            }
+            isSearchingFiles = false
+        }
+    }
+
+    func showLargestFiles() {
+        fileQuery = ""
+        searchFiles()
+    }
+
+    func trash(_ file: FileUsage) {
+        do {
+            var resultingURL: NSURL?
+            try FileManager.default.trashItem(
+                at: URL(fileURLWithPath: file.path),
+                resultingItemURL: &resultingURL
+            )
+            fileResults.removeAll { $0.path == file.path }
+            statusMessage = "Moved \(file.name) to Trash"
+        } catch {
+            lastError = String(describing: error)
+        }
+    }
+
+    func openFullDiskAccessSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func toggleWatching() {
+        if isWatching {
+            stopWatching()
+        } else {
+            startWatching()
+        }
+    }
+
+    private func loadCachedSnapshot(startWatcher: Bool) {
+        do {
+            if let cached = try indexStore.load(rootPath: rootPath) {
+                apply(cached)
+                statusMessage = "Loaded cached index"
+                if startWatcher { self.startWatching() }
+            } else {
+                statusMessage = "No index yet — run Scan"
+            }
+        } catch {
+            lastError = String(describing: error)
+        }
+    }
+
+    private func apply(_ snapshot: IndexedScanSnapshot) {
+        self.snapshot = snapshot
+        var pathMap: [String: DirectoryUsage] = [:]
+        pathMap.reserveCapacity(snapshot.result.directories.count)
+        var childMap: [String: [DirectoryUsage]] = [:]
+
+        for usage in snapshot.result.directories {
+            pathMap[usage.path] = usage
+            if usage.path != snapshot.result.rootPath {
+                let parent = (usage.path as NSString).deletingLastPathComponent
+                childMap[parent, default: []].append(usage)
+            }
+        }
+        usageByPath = pathMap
+        childrenByParent = childMap
+
+        if currentDirectory != rootPath && usageByPath[currentDirectory] == nil {
+            currentDirectory = rootPath
+        }
+    }
+
+    private func startWatching() {
+        guard watcher == nil, snapshot != nil else { return }
+        do {
+            guard let cursor = try indexStore.lastEventID(rootPath: rootPath) else {
+                statusMessage = "Run Scan once to enable live updates"
+                return
+            }
+
+            let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+            let indexStore = self.indexStore
+            let updater = IncrementalIndexUpdater(
+                rootURL: rootURL,
+                store: indexStore,
+                scanner: scanner,
+                scanOptions: ScanOptions(
+                    stayOnRootVolume: true,
+                    includeHiddenFiles: true,
+                    workerCount: min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
+                )
+            )
+            let root = rootPath
+            let queue = syncQueue
+            let modelBox = WeakAppModelBox(self)
+
+            let watcher = FSEventWatcher(
+                rootPath: root,
+                sinceWhen: FSEventStreamEventId(cursor)
+            ) { changes in
+                queue.async {
+                    do {
+                        let sync = try updater.synchronize(changes: changes)
+                        guard !sync.refreshedPaths.isEmpty || sync.fullRescan else { return }
+                        guard let refreshed = try indexStore.load(rootPath: root) else { return }
+                        Task { @MainActor in
+                            guard let model = modelBox.value else { return }
+                            model.apply(refreshed)
+                            if sync.fullRescan {
+                                model.statusMessage = "Live index rebuilt"
+                            } else {
+                                model.statusMessage = "Updated \(sync.refreshedPaths.count) changed area(s)"
+                            }
+                        }
+                    } catch {
+                        Task { @MainActor in
+                            guard let model = modelBox.value else { return }
+                            model.lastError = String(describing: error)
+                            model.statusMessage = "Live update failed"
+                        }
+                    }
+                }
+            }
+            try watcher.start()
+            self.watcher = watcher
+            isWatching = true
+        } catch {
+            lastError = String(describing: error)
+            isWatching = false
+        }
+    }
+
+    private func stopWatching() {
+        watcher?.stop()
+        watcher = nil
+        isWatching = false
+    }
+
+    private static func defaultIndexURL() -> URL {
+        let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return applicationSupport
+            .appendingPathComponent("findtree", isDirectory: true)
+            .appendingPathComponent("index.sqlite")
+    }
+}
+
+private enum PathUtilitiesForApp {
+    static func clamp(_ path: String, toRoot root: String) -> String {
+        if path == root || path.hasPrefix(root.hasSuffix("/") ? root : root + "/") {
+            return path
+        }
+        return root
+    }
+}
+
+private extension String {
+    var lastPathComponent: String {
+        (self as NSString).lastPathComponent
+    }
+}
