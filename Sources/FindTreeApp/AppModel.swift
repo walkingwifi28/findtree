@@ -174,10 +174,12 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private var childrenByParent: [String: [DirectoryUsage]] = [:]
     private var usageByPath: [String: DirectoryUsage] = [:]
 
+    private static let lastRootPathDefaultsKey = "findtree.lastRootPath"
+
     init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
-        self.rootPath = home
-        self.currentDirectory = home
+        let initialRoot = Self.restoredRootPath()
+        self.rootPath = initialRoot
+        self.currentDirectory = initialRoot
         self.totalCapacityBytes = nil
 
         let indexURL = Self.defaultIndexURL()
@@ -366,6 +368,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let standardized = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
         rootPath = standardized
         currentDirectory = standardized
+        UserDefaults.standard.set(standardized, forKey: Self.lastRootPathDefaultsKey)
         refreshVolumeCapacity()
         snapshot = nil
         childrenByParent = [:]
@@ -644,6 +647,22 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         } catch {
             totalCapacityBytes = nil
         }
+    }
+
+    private static func restoredRootPath() -> String {
+        guard let savedPath = UserDefaults.standard.string(forKey: lastRootPathDefaultsKey) else {
+            return "/"
+        }
+
+        let standardized = URL(fileURLWithPath: savedPath, isDirectory: true).standardizedFileURL.path
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: standardized, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else {
+            UserDefaults.standard.removeObject(forKey: lastRootPathDefaultsKey)
+            return "/"
+        }
+        return standardized
     }
 
     private static func defaultIndexURL() -> URL {
