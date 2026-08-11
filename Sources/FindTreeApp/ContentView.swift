@@ -3,7 +3,6 @@ import FindTreeCore
 
 struct ContentView: View {
     @StateObject private var model = AppModel()
-    @State private var pendingTrash: FileUsage?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -12,30 +11,15 @@ struct ContentView: View {
             summary
             Divider()
 
-            TabView {
-                storageView
-                    .tabItem { Label("Storage", systemImage: "externaldrive") }
-
-                filesView
-                    .tabItem { Label("Files", systemImage: "doc.text.magnifyingglass") }
-            }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 10)
+            storageView
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
         }
         .frame(minWidth: 980, minHeight: 680)
         .alert("FindTree Error", isPresented: errorBinding) {
             Button("OK", role: .cancel) { model.lastError = nil }
         } message: {
             Text(model.lastError ?? "Unknown error")
-        }
-        .alert("Move file to Trash?", isPresented: trashBinding) {
-            Button("Cancel", role: .cancel) { pendingTrash = nil }
-            Button("Move to Trash", role: .destructive) {
-                if let file = pendingTrash { model.trash(file) }
-                pendingTrash = nil
-            }
-        } message: {
-            Text(pendingTrash?.path ?? "")
         }
     }
 
@@ -220,63 +204,6 @@ struct ContentView: View {
         .padding(.horizontal, 8)
     }
 
-    private var filesView: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 8) {
-                TextField("Search indexed file names", text: $model.fileQuery)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(model.searchFiles)
-
-                Button("Search", action: model.searchFiles)
-                    .keyboardShortcut(.return, modifiers: [])
-                Button("Largest Files", action: model.showLargestFiles)
-
-                if model.isSearchingFiles {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-            .padding(.top, 10)
-
-            HStack(spacing: 8) {
-                Text("File")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("Allocated")
-                    .frame(width: 110, alignment: .trailing)
-                Text("Logical")
-                    .frame(width: 110, alignment: .trailing)
-                Text("Actions")
-                    .frame(width: 100, alignment: .trailing)
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-
-            Divider()
-
-            if model.fileResults.isEmpty {
-                ContentUnavailableView(
-                    "Search the local file index",
-                    systemImage: "doc.text.magnifyingglass",
-                    description: Text("Search by file name or show the largest files. No filesystem rescan is required.")
-                )
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(model.fileResults) { file in
-                            FileRow(
-                                file: file,
-                                onReveal: { model.reveal(file) },
-                                onTrash: { pendingTrash = file }
-                            )
-                            Divider()
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     private var errorBinding: Binding<Bool> {
         Binding(
             get: { model.lastError != nil },
@@ -284,12 +211,7 @@ struct ContentView: View {
         )
     }
 
-    private var trashBinding: Binding<Bool> {
-        Binding(
-            get: { pendingTrash != nil },
-            set: { if !$0 { pendingTrash = nil } }
-        )
-    }
+
 }
 
 private struct SummaryCard: View {
@@ -366,53 +288,3 @@ private struct DirectoryRow: View {
     }
 }
 
-private struct FileRow: View {
-    let file: FileUsage
-    let onReveal: () -> Void
-    let onTrash: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 7) {
-                Image(systemName: "doc.fill")
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(file.name)
-                        .lineLimit(1)
-                    Text(file.parentPath)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text(formatBytes(file.allocatedBytes))
-                .frame(width: 110, alignment: .trailing)
-                .monospacedDigit()
-            Text(formatBytes(file.logicalBytes))
-                .frame(width: 110, alignment: .trailing)
-                .monospacedDigit()
-
-            HStack(spacing: 8) {
-                Button(action: onReveal) {
-                    Image(systemName: "folder")
-                }
-                .buttonStyle(.borderless)
-                .help("Reveal in Finder")
-
-                Button(role: .destructive, action: onTrash) {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-                .help("Move to Trash")
-            }
-            .frame(width: 100, alignment: .trailing)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2, perform: onReveal)
-    }
-}

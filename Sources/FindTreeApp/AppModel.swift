@@ -28,9 +28,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var isScanning = false
     @Published var isWatching = false
     @Published var statusMessage = ""
-    @Published var fileQuery = ""
-    @Published var fileResults: [FileUsage] = []
-    @Published var isSearchingFiles = false
     @Published var lastError: String?
 
     private let scanner = FastScanner()
@@ -117,8 +114,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         snapshot = nil
         childrenByParent = [:]
         usageByPath = [:]
-        fileResults = []
-        fileQuery = ""
         lastError = nil
         statusMessage = ""
         loadCachedSnapshot(startWatcher: false)
@@ -198,49 +193,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func revealCurrentDirectory() {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: currentDirectory)])
-    }
-
-    func reveal(_ file: FileUsage) {
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
-    }
-
-    func searchFiles() {
-        let query = fileQuery
-        let root = rootPath
-        let fileStore = self.fileStore
-        isSearchingFiles = true
-        lastError = nil
-
-        Task {
-            do {
-                let results = try await Task.detached(priority: .userInitiated) {
-                    try fileStore.search(rootPath: root, query: query, limit: 500)
-                }.value
-                fileResults = results
-            } catch {
-                lastError = String(describing: error)
-            }
-            isSearchingFiles = false
-        }
-    }
-
-    func showLargestFiles() {
-        fileQuery = ""
-        searchFiles()
-    }
-
-    func trash(_ file: FileUsage) {
-        do {
-            var resultingURL: NSURL?
-            try FileManager.default.trashItem(
-                at: URL(fileURLWithPath: file.path),
-                resultingItemURL: &resultingURL
-            )
-            fileResults.removeAll { $0.path == file.path }
-            statusMessage = "Moved \(file.name) to Trash"
-        } catch {
-            lastError = String(describing: error)
-        }
     }
 
     func openFullDiskAccessSettings() {
