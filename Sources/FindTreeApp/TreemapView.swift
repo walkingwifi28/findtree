@@ -219,8 +219,7 @@ private struct TreemapTile: View {
                             .layoutPriority(1)
                     }
                     .padding(.horizontal, 6)
-                    .padding(.top, 2)
-                    .frame(height: TreemapLabelMetrics.parentHeaderHeight, alignment: .topLeading)
+                    .padding(.vertical, TreemapLabelMetrics.parentVerticalPadding)
                 }
             }
         }
@@ -551,7 +550,13 @@ private enum TreemapLabelMetrics {
         return rect.width > minimumWidth && rect.height > headerHeight + 8
     }
 
-    static let parentHeaderHeight: CGFloat = 23
+    static let parentVerticalPadding: CGFloat = 2
+
+    static var parentHeaderHeight: CGFloat {
+        let font = NSFont.systemFont(ofSize: 10)
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        return lineHeight + parentVerticalPadding * 2
+    }
 }
 
 private struct TreemapLayoutItem: Identifiable {

@@ -11,7 +11,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("findtree.visualStyle") private var visualStyleRawValue = AppVisualStyle.neumorphic.rawValue
 
-    private let neumorphicHorizontalInset: CGFloat = 18
+    private let neumorphicHorizontalInset: CGFloat = 12
 
     private var visualStyle: AppVisualStyle {
         get { AppVisualStyle(rawValue: visualStyleRawValue) ?? .neumorphic }
@@ -62,7 +62,7 @@ struct ContentView: View {
 
                     storageView
                         .padding(.horizontal, 12)
-                        .padding(.bottom, 10)
+                        .padding(.bottom, 12)
                 }
             }
         case .neumorphic:
@@ -76,7 +76,7 @@ struct ContentView: View {
 
                     storageView
                         .padding(.horizontal, neumorphicHorizontalInset)
-                        .padding(.bottom, 18)
+                        .padding(.bottom, 12)
                 }
             }
         }
@@ -114,7 +114,7 @@ struct ContentView: View {
                 optionsMenu
             }
             .padding(.horizontal, neumorphicHorizontalInset)
-            .padding(.top, 18)
+            .padding(.top, 12)
             .padding(.bottom, 10)
         }
     }
@@ -210,7 +210,7 @@ struct ContentView: View {
                     SummaryCard(title: "Folders", value: result.directoryCount.formatted(), systemImage: "folder", visualStyle: visualStyle)
                 }
                 .padding(.horizontal, neumorphicHorizontalInset)
-                .padding(.vertical, 10)
+                .padding(.vertical, 8)
             }
         } else {
             switch visualStyle {
@@ -259,8 +259,6 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .padding(.top, visualStyle == .neumorphic ? 6 : 0)
-        .padding(.bottom, visualStyle == .neumorphic ? 10 : 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -288,7 +286,7 @@ private struct SummaryCard: View {
         case .neumorphic:
             cardContent
                 .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+                .padding(.vertical, 8)
         }
     }
 
