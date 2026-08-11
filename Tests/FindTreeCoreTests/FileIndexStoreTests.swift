@@ -62,6 +62,55 @@ import Testing
     #expect(grouped[nested]?.map(\.name) == ["nested.dat"])
 }
 
+@Test func queryOnlyReaderOpensWalIndexWithoutSidecars() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("findtree-wal-reader-\(UUID().uuidString)", isDirectory: true)
+    let dbURL = tempRoot.appendingPathComponent("index.sqlite")
+    defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+    let root = "/example/wal-root"
+    let store = FileIndexStore(databaseURL: dbURL)
+
+    let initial = try store.makeFullWriter(rootPath: root)
+    try initial.consume([
+        FileUsage(
+            path: root + "/sample.dat",
+            parentPath: root,
+            name: "sample.dat",
+            logicalBytes: 1_024,
+            allocatedBytes: 4_096
+        )
+    ])
+    try initial.finish()
+
+    // Subtree writers switch the persistent database to WAL mode.
+    let walWriter = try store.makeSubtreeWriter(rootPath: root, subtreePath: root)
+    try walWriter.consume([
+        FileUsage(
+            path: root + "/sample.dat",
+            parentPath: root,
+            name: "sample.dat",
+            logicalBytes: 1_024,
+            allocatedBytes: 4_096
+        )
+    ])
+    try walWriter.finish()
+
+    let fileDB = store.databaseURL(rootPath: root)
+    try? FileManager.default.removeItem(atPath: fileDB.path + "-wal")
+    try? FileManager.default.removeItem(atPath: fileDB.path + "-shm")
+
+    let grouped = try store.filesForParents(
+        rootPath: root,
+        parentPaths: [root],
+        limitPerParent: 8
+    )
+    #expect(grouped[root]?.map(\.name) == ["sample.dat"])
+
+    let searched = try store.search(rootPath: root, query: "sample.dat", limit: 8)
+    #expect(searched.map(\.name) == ["sample.dat"])
+}
+
 @Test func incrementalUpdaterKeepsFileIndexInSync() throws {
     let tempRoot = FileManager.default.temporaryDirectory
         .appendingPathComponent("findtree-file-sync-\(UUID().uuidString)", isDirectory: true)

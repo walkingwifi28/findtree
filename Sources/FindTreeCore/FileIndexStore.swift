@@ -83,7 +83,7 @@ public final class FileIndexStore: @unchecked Sendable {
         defer { accessGate.signal() }
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
 
-        let db = try openReadOnly(url)
+        let db = try openQueryOnly(url)
         defer { sqlite3_close(db) }
 
         let storedRoot = try loadStoredRoot(db)
@@ -181,7 +181,7 @@ public final class FileIndexStore: @unchecked Sendable {
         defer { accessGate.signal() }
         guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
 
-        let db = try openReadOnly(url)
+        let db = try openQueryOnly(url)
         defer { sqlite3_close(db) }
         guard try loadStoredRoot(db) == root else { return [:] }
 
@@ -370,14 +370,25 @@ public final class FileIndexStore: @unchecked Sendable {
         return db
     }
 
-    private func openReadOnly(_ url: URL) throws -> OpaquePointer {
+    private func openQueryOnly(_ url: URL) throws -> OpaquePointer {
         var db: OpaquePointer?
-        let status = sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        // A WAL database may need to create/open its -wal/-shm sidecars even for
+        // logically read-only queries. SQLITE_OPEN_READONLY can therefore fail with
+        // SQLITE_CANTOPEN when those sidecars do not exist yet. Open the database
+        // read-write so SQLite can manage WAL bookkeeping, then prohibit SQL writes.
+        let status = sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
         guard status == SQLITE_OK, let db else {
             if let db { sqlite3_close(db) }
             throw FileIndexError.sqlite("Could not open file index")
         }
         sqlite3_busy_timeout(db, 5_000)
+        do {
+            try execute(db, "PRAGMA query_only=ON")
+            try execute(db, "PRAGMA temp_store=MEMORY")
+        } catch {
+            sqlite3_close(db)
+            throw error
+        }
         return db
     }
 
