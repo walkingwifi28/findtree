@@ -16,6 +16,17 @@ struct ContentView: View {
                 .padding(.bottom, 10)
         }
         .frame(minWidth: 980, minHeight: 680)
+        .alert("Full Disk Access is not enabled", isPresented: $model.shouldShowFullDiskAccessNotice) {
+            Button("Open Settings") {
+                model.dismissFullDiskAccessNotice()
+                model.openFullDiskAccessSettings()
+            }
+            Button("Later", role: .cancel) {
+                model.dismissFullDiskAccessNotice()
+            }
+        } message: {
+            Text("To scan the entire Mac, allow FindTree in System Settings → Privacy & Security → Full Disk Access. After enabling it, restart FindTree.")
+        }
         .alert("FindTree Error", isPresented: errorBinding) {
             Button("OK", role: .cancel) { model.lastError = nil }
         } message: {

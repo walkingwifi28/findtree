@@ -164,6 +164,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var scanProgressPercent: Int?
     @Published var statusMessage = ""
     @Published var lastError: String?
+    @Published var shouldShowFullDiskAccessNotice: Bool
     @Published private var treemapFilesByParent: [String: [FileUsage]] = [:]
 
     private let scanner = FastScanner()
@@ -181,6 +182,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         self.rootPath = initialRoot
         self.currentDirectory = initialRoot
         self.totalCapacityBytes = nil
+        self.shouldShowFullDiskAccessNotice = !Self.hasFullDiskAccess()
 
         let indexURL = Self.defaultIndexURL()
         self.indexStore = ScanIndexStore(databaseURL: indexURL)
@@ -583,6 +585,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         NSWorkspace.shared.open(url)
     }
 
+    func dismissFullDiskAccessNotice() {
+        shouldShowFullDiskAccessNotice = false
+    }
+
     private func loadCachedSnapshot() {
         let root = rootPath
         let indexStore = self.indexStore
@@ -647,6 +653,36 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         } catch {
             totalCapacityBytes = nil
         }
+    }
+
+    private static func hasFullDiskAccess() -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let tccDirectory = home.appendingPathComponent(
+            "Library/Application Support/com.apple.TCC",
+            isDirectory: true
+        )
+
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: tccDirectory.path, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            return (try? FileManager.default.contentsOfDirectory(atPath: tccDirectory.path)) != nil
+        }
+
+        // Fallback probes for unusual installations where the user TCC directory is absent.
+        let protectedLocations = [
+            home.appendingPathComponent("Library/Mail", isDirectory: true),
+            home.appendingPathComponent("Library/Messages", isDirectory: true)
+        ]
+        for location in protectedLocations {
+            isDirectory = false
+            guard FileManager.default.fileExists(atPath: location.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue
+            else { continue }
+            return (try? FileManager.default.contentsOfDirectory(atPath: location.path)) != nil
+        }
+
+        // If no known protected location exists, do not show a warning based on a guess.
+        return true
     }
 
     private static func restoredRootPath() -> String {
