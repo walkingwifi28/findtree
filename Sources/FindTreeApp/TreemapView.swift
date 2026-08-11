@@ -13,8 +13,6 @@ struct TreemapNode: Identifiable {
 
 struct TreemapView: View {
     let root: TreemapNode
-    let onSelectDirectory: (DirectoryUsage) -> Void
-    let onSelectFile: (FileUsage) -> Void
     let onMoveToTrash: (URL) -> Void
 
 
@@ -34,8 +32,6 @@ struct TreemapView: View {
                 ForEach(layouts) { layout in
                     TreemapTile(
                         layout: layout,
-                        onSelectDirectory: onSelectDirectory,
-                        onSelectFile: onSelectFile,
                         onMoveToTrash: onMoveToTrash
                     )
                 }
@@ -119,15 +115,10 @@ private enum TreemapEntry: Identifiable {
 
 private struct TreemapTile: View {
     let layout: TreemapLayoutItem
-    let onSelectDirectory: (DirectoryUsage) -> Void
-    let onSelectFile: (FileUsage) -> Void
     let onMoveToTrash: (URL) -> Void
 
     var body: some View {
-        Button(action: handleSelection) {
-            tileContent
-        }
-        .buttonStyle(.plain)
+        tileContent
         .frame(width: tileWidth, height: tileHeight)
         .offset(x: layout.rect.minX + layout.gap, y: layout.rect.minY + layout.gap)
         .zIndex(Double(layout.depth))
@@ -184,17 +175,6 @@ private struct TreemapTile: View {
                         .padding(layout.depth <= 2 ? 6 : 4)
                 }
             }
-        }
-    }
-
-    private func handleSelection() {
-        switch layout.entry {
-        case .directory(let node):
-            onSelectDirectory(node.usage)
-        case .file(let file):
-            onSelectFile(file)
-        case .aggregate:
-            break
         }
     }
 

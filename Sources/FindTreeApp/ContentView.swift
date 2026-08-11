@@ -113,44 +113,11 @@ struct ContentView: View {
     }
 
     private var storageView: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Button(action: model.navigateUp) {
-                    Image(systemName: "chevron.left")
-                }
-                .disabled(!model.canNavigateUp)
-
-                Button(action: model.goToRoot) {
-                    Image(systemName: "house")
-                }
-                .disabled(model.currentDirectory == model.rootPath)
-
-                Text(model.currentDirectory)
-                    .font(.system(.callout, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                Spacer()
-
-                if let usage = model.currentUsage {
-                    Text("\(formatBytes(usage.allocatedBytes)) · \(usage.fileCount.formatted()) files")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Text(model.statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .padding(.top, 10)
-
+        VStack(spacing: 0) {
             if let treemapRoot = model.treemapRoot,
                !treemapRoot.children.isEmpty || treemapRoot.directAllocatedBytes > 0 {
                 TreemapView(
                     root: treemapRoot,
-                    onSelectDirectory: model.navigate,
-                    onSelectFile: model.revealFile,
                     onMoveToTrash: model.moveToTrash
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
