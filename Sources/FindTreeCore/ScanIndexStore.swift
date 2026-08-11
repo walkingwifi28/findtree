@@ -245,40 +245,6 @@ public final class ScanIndexStore: @unchecked Sendable {
         }
     }
 
-    public func lastEventID(rootPath: String) throws -> UInt64? {
-        guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
-        let db = try openDatabase(readOnly: true)
-        defer { sqlite3_close(db) }
-
-        var statement: OpaquePointer?
-        let sql = "SELECT last_event_id FROM event_cursors WHERE root_path = ?"
-        try check(sqlite3_prepare_v2(db, sql, -1, &statement, nil), db: db)
-        defer { sqlite3_finalize(statement) }
-        try bindText(standardized(rootPath), at: 1, statement: statement, db: db)
-        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-        return UInt64(bitPattern: sqlite3_column_int64(statement, 0))
-    }
-
-    public func saveLastEventID(_ eventID: UInt64, rootPath: String) throws {
-        try prepareParentDirectory()
-        let db = try openDatabase()
-        defer { sqlite3_close(db) }
-        try configure(db)
-        try createSchema(db)
-
-        let sql = """
-        INSERT INTO event_cursors (root_path, last_event_id)
-        VALUES (?, ?)
-        ON CONFLICT(root_path) DO UPDATE SET
-            last_event_id = MAX(event_cursors.last_event_id, excluded.last_event_id)
-        """
-        var statement: OpaquePointer?
-        try check(sqlite3_prepare_v2(db, sql, -1, &statement, nil), db: db)
-        defer { sqlite3_finalize(statement) }
-        try bindText(standardized(rootPath), at: 1, statement: statement, db: db)
-        sqlite3_bind_int64(statement, 2, sqlite3_int64(bitPattern: eventID))
-        try checkStepDone(sqlite3_step(statement), db: db)
-    }
 
     private func prepareParentDirectory() throws {
         let parent = databaseURL.deletingLastPathComponent()
@@ -329,13 +295,6 @@ public final class ScanIndexStore: @unchecked Sendable {
             file_count INTEGER NOT NULL,
             directory_count INTEGER NOT NULL,
             PRIMARY KEY (root_path, path)
-        ) WITHOUT ROWID
-        """)
-
-        try execute(db, sql: """
-        CREATE TABLE IF NOT EXISTS event_cursors (
-            root_path TEXT PRIMARY KEY,
-            last_event_id INTEGER NOT NULL
         ) WITHOUT ROWID
         """)
     }

@@ -51,14 +51,6 @@ struct ContentView: View {
             .disabled(model.isScanning)
             .keyboardShortcut("r", modifiers: [.command])
 
-            Button(action: model.toggleWatching) {
-                Label(
-                    model.isWatching ? "Live" : "Paused",
-                    systemImage: model.isWatching ? "dot.radiowaves.left.and.right" : "pause.circle"
-                )
-            }
-            .disabled(model.snapshot == nil || model.isScanning)
-
             Menu {
                 Button("Reveal Current Folder in Finder", action: model.revealCurrentDirectory)
                 Button("Full Disk Access Settings", action: model.openFullDiskAccessSettings)

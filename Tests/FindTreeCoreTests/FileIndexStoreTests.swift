@@ -1,5 +1,4 @@
 import Foundation
-import CoreServices
 import Testing
 @testable import FindTreeCore
 
@@ -109,55 +108,6 @@ import Testing
 
     let searched = try store.search(rootPath: root, query: "sample.dat", limit: 8)
     #expect(searched.map(\.name) == ["sample.dat"])
-}
-
-@Test func incrementalUpdaterKeepsFileIndexInSync() throws {
-    let tempRoot = FileManager.default.temporaryDirectory
-        .appendingPathComponent("findtree-file-sync-\(UUID().uuidString)", isDirectory: true)
-    let scanRoot = tempRoot.appendingPathComponent("scan", isDirectory: true)
-    let nested = scanRoot.appendingPathComponent("nested", isDirectory: true)
-    let dbURL = tempRoot.appendingPathComponent("index.sqlite")
-    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: tempRoot) }
-
-    let firstFile = nested.appendingPathComponent("first.dat")
-    try Data(repeating: 1, count: 1_024).write(to: firstFile)
-
-    let scanner = FastScanner()
-    let scanStore = ScanIndexStore(databaseURL: dbURL)
-    let fileStore = FileIndexStore(databaseURL: dbURL)
-    let writer = try fileStore.makeFullWriter(rootPath: scanRoot.path)
-    let initial = try scanner.scan(
-        rootURL: scanRoot,
-        progressEvery: 0,
-        onFileBatch: { try writer.consume($0) }
-    )
-    try writer.finish()
-    try scanStore.save(initial)
-
-    try FileManager.default.removeItem(at: firstFile)
-    let secondFile = nested.appendingPathComponent("second.dat")
-    try Data(repeating: 2, count: 4_096).write(to: secondFile)
-
-    let modifiedFlags = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemModified)
-    let removedFlags = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemRemoved)
-    let updater = IncrementalIndexUpdater(rootURL: scanRoot, store: scanStore)
-    _ = try updater.synchronize(changes: [
-        FileSystemChange(path: firstFile.path, flags: removedFlags, eventID: 122),
-        FileSystemChange(path: secondFile.path, flags: modifiedFlags, eventID: 123)
-    ])
-
-    #expect(try fileStore.search(rootPath: scanRoot.path, query: "first.dat", limit: 10).isEmpty)
-    let second = try fileStore.search(rootPath: scanRoot.path, query: "second.dat", limit: 10)
-    #expect(second.count == 1)
-    #expect(second.first?.logicalBytes == 4_096)
-
-    let cached = try #require(scanStore.load(rootPath: scanRoot.path)?.result)
-    let fresh = try scanner.scan(rootURL: scanRoot, progressEvery: 0)
-    #expect(cached.fileCount == fresh.fileCount)
-    #expect(cached.directoryCount == fresh.directoryCount)
-    #expect(cached.logicalBytes == fresh.logicalBytes)
-    #expect(cached.allocatedBytes == fresh.allocatedBytes)
 }
 
 

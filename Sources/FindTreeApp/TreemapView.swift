@@ -150,7 +150,7 @@ private struct TreemapTile: View {
             RoundedRectangle(cornerRadius: cornerRadius)
                 .fill(
                     layout.isTerminal
-                        ? TreemapColor.terminalColor(for: layout.entry.path)
+                        ? TreemapColor.terminalColor(for: layout.entry)
                         : Color.clear
                 )
             RoundedRectangle(cornerRadius: cornerRadius)
@@ -169,10 +169,21 @@ private struct TreemapTile: View {
                     }
                     .padding(layout.depth <= 2 ? 6 : 4)
                 } else {
-                    Text(layout.entry.displayName + "  " + formatBytes(layout.entry.allocatedBytes))
-                        .font(labelFont)
-                        .lineLimit(1)
-                        .padding(layout.depth <= 2 ? 6 : 4)
+                    HStack(spacing: 4) {
+                        Text(layout.entry.displayName)
+                            .font(labelFont)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text(formatBytes(layout.entry.allocatedBytes))
+                            .font(sizeLabelFont)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(1)
+                    }
+                    .padding(.horizontal, 4)
+                    .frame(height: TreemapLabelMetrics.parentHeaderHeight, alignment: .leading)
                 }
             }
         }
@@ -185,12 +196,9 @@ private struct TreemapTile: View {
 
     private var shouldShowLabel: Bool {
         if layout.isTerminal {
-            return layout.rect.width > 72 && layout.rect.height > 40
+            return TreemapLabelMetrics.shouldShowTerminalLabel(in: layout.rect)
         }
-        if layout.depth <= 2 {
-            return layout.rect.width > 78 && layout.rect.height > 24
-        }
-        return layout.rect.width > 88 && layout.rect.height > 22
+        return TreemapLabelMetrics.shouldShowParentLabel(in: layout.rect)
     }
 
     private var labelFont: Font {
@@ -349,16 +357,181 @@ private struct FastTreemapTooltipView: View {
     }
 }
 
+private enum TreemapFileCategory {
+    case video
+    case image
+    case audio
+    case archive
+    case application
+    case document
+    case code
+    case system
+    case other
+
+    static func classify(fileName: String) -> TreemapFileCategory {
+        let lowercasedName = fileName.lowercased()
+        let ext = (lowercasedName as NSString).pathExtension
+
+        switch ext {
+        case "mp4", "m4v", "mov", "mkv", "avi", "webm", "wmv", "flv", "mpeg", "mpg", "m2ts", "mts", "3gp":
+            return .video
+        case "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "tif", "tiff", "bmp", "svg", "ico", "icns", "avif", "raw", "dng", "psd":
+            return .image
+        case "mp3", "m4a", "aac", "wav", "flac", "ogg", "oga", "opus", "aiff", "aif", "wma", "caf":
+            return .audio
+        case "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst", "lz", "lzma", "cab", "iso", "dmg", "pkg", "xip":
+            return .archive
+        case "app", "exe", "dll", "dylib", "so", "bin", "msi", "com", "bundle", "plugin", "appex":
+            return .application
+        case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "key", "rtf", "rtfd", "odt", "ods", "odp", "epub", "md", "markdown", "txt", "csv", "tsv":
+            return .document
+        case "swift", "m", "mm", "h", "hpp", "c", "cc", "cpp", "cs", "java", "kt", "kts", "py", "rb", "php", "go", "rs", "js", "jsx", "ts", "tsx", "vue", "svelte", "html", "htm", "css", "scss", "sass", "less", "json", "yaml", "yml", "toml", "xml", "sql", "sh", "bash", "zsh", "fish", "ps1", "gradle":
+            return .code
+        case "plist", "strings", "stringsdict", "entitlements", "mobileprovision", "car", "mom", "momd", "nib", "storyboardc", "xcassets", "DS_Store".lowercased():
+            return .system
+        default:
+            if lowercasedName == ".ds_store" || lowercasedName.hasPrefix("._") {
+                return .system
+            }
+            return .other
+        }
+    }
+
+    static func classify(directoryPath: String) -> TreemapFileCategory? {
+        let ext = (directoryPath.lowercased() as NSString).pathExtension
+        switch ext {
+        case "app", "bundle", "plugin", "appex", "xpc":
+            return .application
+        case "framework", "kext", "systemextension":
+            return .system
+        default:
+            return nil
+        }
+    }
+}
+
 private enum TreemapColor {
-    static func terminalColor(for path: String) -> Color {
+    static func terminalColor(for entry: TreemapEntry) -> Color {
+        switch entry {
+        case .file(let file):
+            let category = TreemapFileCategory.classify(fileName: file.name)
+            return color(for: category, variationKey: fileExtensionKey(file.name))
+
+        case .directory(let node):
+            if let packageCategory = TreemapFileCategory.classify(directoryPath: node.usage.path) {
+                return color(for: packageCategory, variationKey: (node.usage.path as NSString).pathExtension)
+            }
+
+            if let dominant = dominantFileCategory(in: node.files) {
+                return color(for: dominant.category, variationKey: dominant.extensionKey)
+            }
+
+            return color(for: .system, variationKey: "folder")
+
+        case .aggregate(let aggregate):
+            if aggregate.id.hasSuffix("#other-folders") {
+                return color(for: .system, variationKey: "folders")
+            }
+            return color(for: .other, variationKey: "other-files")
+        }
+    }
+
+    private static func dominantFileCategory(
+        in files: [FileUsage]
+    ) -> (category: TreemapFileCategory, extensionKey: String)? {
+        guard !files.isEmpty else { return nil }
+
+        var bytesByCategory: [TreemapFileCategory: UInt64] = [:]
+        var largestFileByCategory: [TreemapFileCategory: FileUsage] = [:]
+
+        for file in files where file.allocatedBytes > 0 {
+            let category = TreemapFileCategory.classify(fileName: file.name)
+            bytesByCategory[category, default: 0] &+= file.allocatedBytes
+            if largestFileByCategory[category]?.allocatedBytes ?? 0 < file.allocatedBytes {
+                largestFileByCategory[category] = file
+            }
+        }
+
+        guard let category = bytesByCategory.max(by: { $0.value < $1.value })?.key else {
+            return nil
+        }
+        let extensionKey = largestFileByCategory[category].map { fileExtensionKey($0.name) } ?? ""
+        return (category, extensionKey)
+    }
+
+    private static func fileExtensionKey(_ fileName: String) -> String {
+        let ext = (fileName.lowercased() as NSString).pathExtension
+        return ext.isEmpty ? fileName.lowercased() : ext
+    }
+
+    private static func color(for category: TreemapFileCategory, variationKey: String) -> Color {
+        let base: (hue: Double, saturation: Double, brightness: Double)
+        switch category {
+        case .video:
+            base = (0.585, 0.48, 0.72) // blue
+        case .image:
+            base = (0.765, 0.42, 0.72) // purple
+        case .audio:
+            base = (0.915, 0.40, 0.73) // pink
+        case .archive:
+            base = (0.080, 0.48, 0.76) // orange
+        case .application:
+            base = (0.005, 0.44, 0.70) // red
+        case .document:
+            base = (0.350, 0.38, 0.68) // green
+        case .code:
+            base = (0.505, 0.40, 0.68) // cyan
+        case .system:
+            base = (0.600, 0.06, 0.60) // neutral gray
+        case .other:
+            base = (0.145, 0.30, 0.72) // yellow / beige
+        }
+
+        let variation = stableVariation(for: variationKey)
+        let hue = wrappedHue(base.hue + variation.hue)
+        let saturation = min(max(base.saturation + variation.saturation, 0.02), 0.58)
+        let brightness = min(max(base.brightness + variation.brightness, 0.54), 0.82)
+        return Color(hue: hue, saturation: saturation, brightness: brightness)
+    }
+
+    private static func stableVariation(
+        for key: String
+    ) -> (hue: Double, saturation: Double, brightness: Double) {
         var hash: UInt64 = 0xcbf29ce484222325
-        for byte in path.utf8 {
+        for byte in key.lowercased().utf8 {
             hash ^= UInt64(byte)
             hash &*= 0x100000001b3
         }
-        let hue = Double(hash % 360) / 360.0
-        return Color(hue: hue, saturation: 0.20, brightness: 0.68)
+
+        // Keep extensions recognizably inside their category while avoiding a
+        // completely flat wall of one color.
+        let hue = (Double(Int(hash % 17) - 8) / 8.0) * 0.012
+        let saturation = (Double(Int((hash >> 8) % 9) - 4) / 4.0) * 0.035
+        let brightness = (Double(Int((hash >> 16) % 11) - 5) / 5.0) * 0.045
+        return (hue, saturation, brightness)
     }
+
+    private static func wrappedHue(_ hue: Double) -> Double {
+        let value = hue.truncatingRemainder(dividingBy: 1.0)
+        return value < 0 ? value + 1.0 : value
+    }
+}
+
+private enum TreemapLabelMetrics {
+    static func shouldShowTerminalLabel(in rect: CGRect) -> Bool {
+        rect.width > 72 && rect.height > 40
+    }
+
+    static func shouldShowParentLabel(in rect: CGRect) -> Bool {
+        let minimumWidth: CGFloat = 78
+        let headerHeight = parentHeaderHeight
+        // Keep enough room below the label for the nested treemap. Using the same
+        // predicate in both rendering and layout prevents child tiles from covering
+        // a label that SwiftUI decided to draw.
+        return rect.width > minimumWidth && rect.height > headerHeight + 8
+    }
+
+    static let parentHeaderHeight: CGFloat = 20
 }
 
 private struct TreemapLayoutItem: Identifiable {
@@ -423,8 +596,8 @@ private enum TreemapLayout {
         }
 
         let labelHeight: CGFloat
-        if rect.width > 72, rect.height > 44 {
-            labelHeight = depth <= 2 ? 22 : 18
+        if TreemapLabelMetrics.shouldShowParentLabel(in: rect) {
+            labelHeight = TreemapLabelMetrics.parentHeaderHeight
         } else {
             labelHeight = 2
         }

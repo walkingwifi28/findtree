@@ -1,5 +1,4 @@
 import Foundation
-import CoreServices
 import Testing
 @testable import FindTreeCore
 
@@ -41,46 +40,6 @@ import Testing
     expectSameSnapshot(cachedAfterDelete, freshAfterDelete)
 }
 
-@Test func coalescesNestedEventPathsToSmallestDirectorySet() {
-    let root = "/tmp/findtree-root"
-    let fileFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemModified)
-    let dirFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagItemModified)
-
-    let changes = [
-        FileSystemChange(path: "\(root)/alpha/a.txt", flags: fileFlag, eventID: 1),
-        FileSystemChange(path: "\(root)/alpha/beta/b.txt", flags: fileFlag, eventID: 2),
-        FileSystemChange(path: "\(root)/gamma", flags: dirFlag, eventID: 3)
-    ]
-
-    let paths = IncrementalIndexUpdater.coalescedRefreshPaths(for: changes, rootPath: root)
-    #expect(paths.isEmpty)
-}
-
-@Test func keepsStructuralDirectoryAndMustScanEvents() {
-    let root = "/tmp/findtree-root"
-    let createdDir = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagItemCreated)
-    let mustScan = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagUserDropped)
-
-    let changes = [
-        FileSystemChange(path: "\(root)/created", flags: createdDir, eventID: 10),
-        FileSystemChange(path: "\(root)/damaged", flags: mustScan, eventID: 11)
-    ]
-
-    let paths = IncrementalIndexUpdater.coalescedRefreshPaths(for: changes, rootPath: root)
-    #expect(Set(paths) == Set(["\(root)/created", "\(root)/damaged"]))
-}
-
-@Test func persistsFSEventCursor() throws {
-    let tempRoot = FileManager.default.temporaryDirectory
-        .appendingPathComponent("findtree-event-cursor-\(UUID().uuidString)", isDirectory: true)
-    let dbURL = tempRoot.appendingPathComponent("index.sqlite")
-    defer { try? FileManager.default.removeItem(at: tempRoot) }
-
-    let store = ScanIndexStore(databaseURL: dbURL)
-    try store.saveLastEventID(9_876_543_210, rootPath: tempRoot.path)
-    try store.saveLastEventID(100, rootPath: tempRoot.path)
-    #expect(try store.lastEventID(rootPath: tempRoot.path) == 9_876_543_210)
-}
 
 private func expectSameSnapshot(_ lhs: ScanResult, _ rhs: ScanResult) {
     #expect(lhs.fileCount == rhs.fileCount)

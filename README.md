@@ -41,24 +41,6 @@ The file database stores only:
 
 File-name search uses SQLite FTS5 with the trigram tokenizer. Full file paths are reconstructed only when results are returned.
 
-### Live incremental updates
-
-- FSEvents watcher
-- persistent FSEvent cursor
-- changed file events are coalesced to the smallest non-overlapping directory set
-- only affected subtrees are rescanned
-- size/count deltas are propagated to cached ancestors
-- changed file-index subtrees are replaced transactionally
-- FSEvents overflow / root changes fall back to a full rescan
-- index database events are excluded to prevent feedback loops
-
-CLI live mode:
-
-```bash
-.build/release/findtree ~ --watch
-```
-
-The cached result is shown immediately, then FSEvents keeps the local index current.
 
 ### Native macOS app
 
@@ -67,7 +49,6 @@ The SwiftUI app includes:
 - folder picker
 - Scan / Rescan
 - cached result shown at launch
-- live FSEvents status
 - allocated/logical size summary
 - folder drill-down table
 - folder filtering and sorting
@@ -146,7 +127,6 @@ arch -arm64 swift test
 .build/release/findtree ~
 .build/release/findtree /Users --top 30
 .build/release/findtree ~ --cached
-.build/release/findtree ~ --watch
 .build/release/findtree ~ --files ".mov" --file-limit 100
 .build/release/findtree ~ --largest-files --file-limit 100
 ```
@@ -156,7 +136,6 @@ arch -arm64 swift test
 - `--top N`: show N largest directories
 - `--workers N`: parallel directory workers
 - `--cached`: read the local directory snapshot without scanning
-- `--watch`: show cached data and keep it current using FSEvents
 - `--files QUERY`: search the local file-name index
 - `--largest-files`: show largest indexed files
 - `--file-limit N`: file result limit
@@ -173,6 +152,6 @@ The app surfaces the unreadable-directory count and provides a shortcut to the F
 
 ## Design notes
 
-FindTree intentionally does not parse raw APFS container structures. The current design uses supported macOS APIs for scanning and FSEvents for change tracking. That keeps FileVault, APFS volume groups, snapshots, and OS updates out of the scanner's raw-filesystem compatibility surface.
+FindTree intentionally does not parse raw APFS container structures. The current design uses supported macOS APIs for scanning and local SQLite indexes. That keeps FileVault, APFS volume groups, snapshots, and OS updates out of the scanner's raw-filesystem compatibility surface.
 
 A future low-level `getattrlistbulk()` implementation can still be benchmarked against Foundation if further first-scan optimization is needed.

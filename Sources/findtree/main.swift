@@ -1,6 +1,5 @@
 import Foundation
 import Darwin
-import CoreServices
 import FindTreeCore
 
 struct Arguments {
@@ -10,7 +9,6 @@ struct Arguments {
     var stayOnVolume = true
     var workerCount = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
     var cacheOnly = false
-    var watch = false
     var fileQuery: String?
     var fileLimit = 50
     var largestFiles = false
@@ -41,8 +39,6 @@ struct Arguments {
                 }
             case "--cached":
                 cacheOnly = true
-            case "--watch":
-                watch = true
             case "--files":
                 if index + 1 < raw.count {
                     fileQuery = raw[index + 1]
@@ -74,11 +70,6 @@ struct Arguments {
         if let positionalPath {
             path = (positionalPath as NSString).expandingTildeInPath
         }
-
-        if watch {
-            indexEnabled = true
-            cacheOnly = false
-        }
     }
 }
 
@@ -101,7 +92,6 @@ private func printHelpAndExit() -> Never {
       --top N             Show N largest directories (default: 20)
       --workers N         Parallel directory workers (default: up to 8)
       --cached            Load the latest local SQLite snapshot without scanning
-      --watch             Show cached data immediately and keep it synced with FSEvents
       --files QUERY       Search the local file index without rescanning
       --largest-files     Show the largest files from the local index
       --file-limit N      Limit file search/list results (default: 50)
@@ -114,7 +104,6 @@ private func printHelpAndExit() -> Never {
       findtree ~
       findtree /Users --top 30
       findtree ~ --cached
-      findtree ~ --watch
       findtree ~ --files ".mov"
       findtree ~ --largest-files --file-limit 100
     """)
@@ -169,9 +158,6 @@ private func scanAndIndex(
 ) throws -> ScanResult {
     fputs("Scanning \(rootURL.path) with \(args.workerCount) workers...\n", stderr)
     let progressStart = ContinuousClock.now
-    // Save the cursor from before the scan. Events that happen during the scan are replayed later,
-    // preventing a change from falling into the gap between scanning and starting FSEvents.
-    let cursorBeforeScan = UInt64(FSEventsGetCurrentEventId())
 
     let fileWriter: FileIndexWriter?
     if args.indexEnabled {
@@ -216,7 +202,6 @@ private func scanAndIndex(
     if args.indexEnabled {
         let indexStartedAt = ContinuousClock.now
         try indexStore.save(result)
-        try indexStore.saveLastEventID(cursorBeforeScan, rootPath: rootURL.path)
         let duration = indexStartedAt.duration(to: .now)
         let seconds = Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1_000_000_000_000_000_000
         fputs(String(format: "Indexed locally in %.3f s: %@\n", seconds, indexStore.databaseURL.path), stderr)
@@ -225,98 +210,6 @@ private func scanAndIndex(
     return result
 }
 
-
-private final class WatchChangeQueue: @unchecked Sendable {
-    private let lock = NSLock()
-    private var synchronizing = false
-    private var queued: [FileSystemChange] = []
-
-    func enqueue(_ changes: [FileSystemChange]) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        queued.append(contentsOf: changes)
-        if synchronizing { return false }
-        synchronizing = true
-        return true
-    }
-
-    func takeNextBatch() -> [FileSystemChange]? {
-        lock.lock()
-        defer { lock.unlock() }
-        if queued.isEmpty {
-            synchronizing = false
-            return nil
-        }
-        let batch = queued
-        queued.removeAll(keepingCapacity: true)
-        return batch
-    }
-}
-
-private func runWatchMode(
-    rootURL: URL,
-    args: Arguments,
-    scanner: FastScanner,
-    indexStore: ScanIndexStore
-) throws -> Never {
-    var snapshot = try indexStore.load(rootPath: rootURL.path)
-    var cursor = try indexStore.lastEventID(rootPath: rootURL.path)
-
-    if snapshot == nil || cursor == nil {
-        let fresh = try scanAndIndex(rootURL: rootURL, args: args, scanner: scanner, indexStore: indexStore)
-        printResult(fresh, top: args.top)
-        snapshot = try indexStore.load(rootPath: rootURL.path)
-        cursor = try indexStore.lastEventID(rootPath: rootURL.path)
-    } else if let snapshot {
-        printResult(snapshot.result, top: args.top, cachedAt: snapshot.indexedAt)
-    }
-
-    let updater = IncrementalIndexUpdater(
-        rootURL: rootURL,
-        store: indexStore,
-        scanner: scanner,
-        scanOptions: ScanOptions(
-            stayOnRootVolume: args.stayOnVolume,
-            includeHiddenFiles: args.includeHidden,
-            workerCount: args.workerCount
-        )
-    )
-
-    let changeQueue = WatchChangeQueue()
-    let processQueue = DispatchQueue(label: "findtree.incremental-sync", qos: .utility)
-    let watcher = FSEventWatcher(
-        rootPath: rootURL.path,
-        sinceWhen: FSEventStreamEventId(cursor ?? UInt64(kFSEventStreamEventIdSinceNow))
-    ) { changes in
-        guard changeQueue.enqueue(changes) else { return }
-
-        processQueue.async {
-            while let batch = changeQueue.takeNextBatch() {
-                do {
-                    let sync = try updater.synchronize(changes: batch)
-                    if sync.fullRescan {
-                        fputs(String(format: "\nFSEvents overflow/root change: full rescan completed in %.3f s\n", sync.elapsedSeconds), stderr)
-                    } else if !sync.refreshedPaths.isEmpty {
-                        fputs(String(format: "\nIncremental refresh: %d subtree(s) in %.3f s\n", sync.refreshedPaths.count, sync.elapsedSeconds), stderr)
-                        for path in sync.refreshedPaths.prefix(10) {
-                            fputs("  - \(path)\n", stderr)
-                        }
-                    }
-
-                    if let updated = try indexStore.load(rootPath: rootURL.path), !sync.refreshedPaths.isEmpty || sync.fullRescan {
-                        printResult(updated.result, top: args.top, cachedAt: updated.indexedAt)
-                    }
-                } catch {
-                    fputs("findtree watch: incremental sync failed: \(error)\n", stderr)
-                }
-            }
-        }
-    }
-
-    try watcher.start()
-    fputs("Watching \(rootURL.path) for changes. Press Ctrl-C to stop.\n", stderr)
-    dispatchMain()
-}
 
 let args = Arguments(Array(CommandLine.arguments.dropFirst()))
 let rootURL = URL(fileURLWithPath: args.path, isDirectory: true).standardizedFileURL
@@ -357,15 +250,6 @@ if args.cacheOnly {
         }
         printResult(snapshot.result, top: args.top, cachedAt: snapshot.indexedAt)
         exit(EXIT_SUCCESS)
-    } catch {
-        fputs("findtree: \(error)\n", stderr)
-        exit(EXIT_FAILURE)
-    }
-}
-
-if args.watch {
-    do {
-        try runWatchMode(rootURL: rootURL, args: args, scanner: scanner, indexStore: indexStore)
     } catch {
         fputs("findtree: \(error)\n", stderr)
         exit(EXIT_FAILURE)

@@ -1,7 +1,6 @@
 import Foundation
 import AppKit
 import Combine
-import CoreServices
 import FindTreeCore
 
 private final class WeakAppModelBox: @unchecked Sendable {
@@ -163,7 +162,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var totalCapacityBytes: UInt64?
     @Published var isScanning = false
     @Published var scanProgressPercent: Int?
-    @Published var isWatching = false
     @Published var statusMessage = ""
     @Published var lastError: String?
     @Published private var treemapFilesByParent: [String: [FileUsage]] = [:]
@@ -171,9 +169,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private let scanner = FastScanner()
     private let indexStore: ScanIndexStore
     private let fileStore: FileIndexStore
-    private let syncQueue = DispatchQueue(label: "findtree.app.incremental-sync", qos: .utility)
-    private var watcher: FSEventWatcher?
-    private var liveRefreshTask: Task<Void, Never>?
     private var cachedSnapshotTask: Task<Void, Never>?
     private var treemapFileTask: Task<Void, Never>?
     private var childrenByParent: [String: [DirectoryUsage]] = [:]
@@ -190,12 +185,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         self.fileStore = FileIndexStore(databaseURL: indexURL)
 
         refreshVolumeCapacity()
-        loadCachedSnapshot(startWatcher: false)
+        loadCachedSnapshot()
     }
 
     deinit {
-        watcher?.stop()
-        liveRefreshTask?.cancel()
         cachedSnapshotTask?.cancel()
         treemapFileTask?.cancel()
     }
@@ -368,7 +361,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     func setRoot(_ path: String) {
-        stopWatching()
         cachedSnapshotTask?.cancel()
         cachedSnapshotTask = nil
         let standardized = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
@@ -384,15 +376,13 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         treemapFileTask = nil
         treemapFilesByParent = [:]
         statusMessage = ""
-        loadCachedSnapshot(startWatcher: false)
+        loadCachedSnapshot()
     }
 
     func scan() {
         guard !isScanning else { return }
         cachedSnapshotTask?.cancel()
         cachedSnapshotTask = nil
-        let resumeWatchingAfterScan = isWatching
-        stopWatching()
         isScanning = true
         scanProgressPercent = 0
         lastError = nil
@@ -405,7 +395,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let indexStore = self.indexStore
         let fileStore = self.fileStore
         let workerCount = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
-        let cursorBeforeScan = UInt64(FSEventsGetCurrentEventId())
 
         Task {
             do {
@@ -429,7 +418,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                         )
                         try writer.finish()
                         try indexStore.save(result)
-                        try indexStore.saveLastEventID(cursorBeforeScan, rootPath: rootURL.path)
                         return try indexStore.load(rootPath: rootURL.path).map(prepareSnapshot)
                     } catch {
                         writer.cancel()
@@ -440,9 +428,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 if let updated {
                     apply(updated)
                     statusMessage = "Indexed \(updated.snapshot.result.fileCount.formatted()) files"
-                    if resumeWatchingAfterScan {
-                        startWatching(catchUpFromStoredCursor: true)
-                    }
                 }
             } catch {
                 lastError = String(describing: error)
@@ -595,16 +580,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         NSWorkspace.shared.open(url)
     }
 
-    func toggleWatching() {
-        if isWatching {
-            stopWatching()
-            statusMessage = "Live paused"
-        } else {
-            startWatching(catchUpFromStoredCursor: false)
-        }
-    }
-
-    private func loadCachedSnapshot(startWatcher: Bool) {
+    private func loadCachedSnapshot() {
         let root = rootPath
         let indexStore = self.indexStore
         let fileStore = self.fileStore
@@ -626,12 +602,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 guard !Task.isCancelled, let self, self.rootPath == root else { return }
                 if let prepared {
                     self.apply(prepared)
-                    self.statusMessage = startWatcher
-                        ? "Loaded cached index"
-                        : "Loaded cached index · Live paused"
-                    if startWatcher {
-                        self.startWatching(catchUpFromStoredCursor: true)
-                    }
+                    self.statusMessage = "Loaded cached index"
                 } else {
                     self.statusMessage = "No index yet — run Scan"
                 }
@@ -659,106 +630,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
         if prepared.treemapFilesByParent == nil {
             refreshTreemapFiles()
-        }
-    }
-
-    private func startWatching(catchUpFromStoredCursor: Bool = false) {
-        guard watcher == nil, snapshot != nil else { return }
-        do {
-            let cursor: UInt64
-            if catchUpFromStoredCursor {
-                guard let storedCursor = try indexStore.lastEventID(rootPath: rootPath) else {
-                    statusMessage = "Run Scan once to enable live updates"
-                    return
-                }
-                cursor = storedCursor
-            } else {
-                // Live is opt-in. Do not replay an arbitrarily large backlog accumulated while
-                // monitoring was paused; Rescan is the explicit way to reconcile older changes.
-                cursor = UInt64(FSEventsGetCurrentEventId())
-                try indexStore.saveLastEventID(cursor, rootPath: rootPath)
-            }
-
-            let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
-            let indexStore = self.indexStore
-            let updater = IncrementalIndexUpdater(
-                rootURL: rootURL,
-                store: indexStore,
-                scanner: scanner,
-                scanOptions: ScanOptions(
-                    stayOnRootVolume: true,
-                    includeHiddenFiles: true,
-                    workerCount: min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
-                )
-            )
-            let root = rootPath
-            let queue = syncQueue
-            let modelBox = WeakAppModelBox(self)
-
-            let watcher = FSEventWatcher(
-                rootPath: root,
-                sinceWhen: FSEventStreamEventId(cursor)
-            ) { changes in
-                queue.async {
-                    do {
-                        let sync = try updater.synchronize(changes: changes)
-                        guard !sync.refreshedPaths.isEmpty || sync.fullRescan else { return }
-                        Task { @MainActor in
-                            guard let model = modelBox.value else { return }
-                            let message = sync.fullRescan
-                                ? "Live index rebuilt"
-                                : "Updated \(sync.refreshedPaths.count) changed area(s)"
-                            model.scheduleLiveRefresh(message: message)
-                        }
-                    } catch {
-                        Task { @MainActor in
-                            guard let model = modelBox.value else { return }
-                            model.lastError = String(describing: error)
-                            model.statusMessage = "Live update failed"
-                        }
-                    }
-                }
-            }
-            try watcher.start()
-            self.watcher = watcher
-            isWatching = true
-            statusMessage = "Live monitoring enabled"
-        } catch {
-            lastError = String(describing: error)
-            isWatching = false
-        }
-    }
-
-    private func stopWatching() {
-        watcher?.stop()
-        watcher = nil
-        liveRefreshTask?.cancel()
-        liveRefreshTask = nil
-        isWatching = false
-    }
-
-    private func scheduleLiveRefresh(message: String) {
-        liveRefreshTask?.cancel()
-        let indexStore = self.indexStore
-        let root = rootPath
-
-        liveRefreshTask = Task { [weak self] in
-            do {
-                try await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled else { return }
-                let refreshed = try await Task.detached(priority: .utility) { () -> PreparedSnapshot? in
-                    try indexStore.load(rootPath: root).map(prepareSnapshot)
-                }.value
-                guard !Task.isCancelled, let refreshed, let self else { return }
-                self.apply(refreshed)
-                self.statusMessage = message
-            } catch is CancellationError {
-                return
-            } catch {
-                guard let self else { return }
-                self.lastError = String(describing: error)
-                self.statusMessage = "Live display refresh failed"
-            }
         }
     }
 
