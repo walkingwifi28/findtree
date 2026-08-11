@@ -26,7 +26,7 @@ public final class FSEventWatcher: @unchecked Sendable {
     public init(
         rootPath: String,
         sinceWhen: FSEventStreamEventId = FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-        latency: CFTimeInterval = 0.25,
+        latency: CFTimeInterval = 1.0,
         handler: @escaping Handler
     ) {
         self.rootPath = PathUtilities.canonicalExisting(rootPath)
@@ -73,10 +73,11 @@ public final class FSEventWatcher: @unchecked Sendable {
             }
         }
 
+        // Let FSEvents coalesce short bursts instead of immediately waking FindTree for
+        // every cache/temp-file write. FileEvents still gives us item-level paths.
         let flags = FSEventStreamCreateFlags(
             kFSEventStreamCreateFlagFileEvents |
             kFSEventStreamCreateFlagWatchRoot |
-            kFSEventStreamCreateFlagNoDefer |
             kFSEventStreamCreateFlagUseCFTypes
         )
 
@@ -110,12 +111,13 @@ public final class FSEventWatcher: @unchecked Sendable {
         self.stream = nil
     }
 
+    /// Only events that make the event-history cursor itself unreliable require a root rebuild.
+    /// `MustScanSubDirs`/dropped-event flags are handled by refreshing the event's subtree rather
+    /// than rescanning the entire indexed root.
     public static func eventRequiresFullRescan(_ flags: FSEventStreamEventFlags) -> Bool {
-        let mustScan = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)
-        let userDropped = FSEventStreamEventFlags(kFSEventStreamEventFlagUserDropped)
-        let kernelDropped = FSEventStreamEventFlags(kFSEventStreamEventFlagKernelDropped)
+        let idsWrapped = FSEventStreamEventFlags(kFSEventStreamEventFlagEventIdsWrapped)
         let rootChanged = FSEventStreamEventFlags(kFSEventStreamEventFlagRootChanged)
-        return flags & (mustScan | userDropped | kernelDropped | rootChanged) != 0
+        return flags & (idsWrapped | rootChanged) != 0
     }
 }
 

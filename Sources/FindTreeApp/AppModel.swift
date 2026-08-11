@@ -38,6 +38,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private let fileStore: FileIndexStore
     private let syncQueue = DispatchQueue(label: "findtree.app.incremental-sync", qos: .utility)
     private var watcher: FSEventWatcher?
+    private var liveRefreshTask: Task<Void, Never>?
     private var childrenByParent: [String: [DirectoryUsage]] = [:]
     private var usageByPath: [String: DirectoryUsage] = [:]
 
@@ -50,11 +51,12 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         self.indexStore = ScanIndexStore(databaseURL: indexURL)
         self.fileStore = FileIndexStore(databaseURL: indexURL)
 
-        loadCachedSnapshot(startWatcher: true)
+        loadCachedSnapshot(startWatcher: false)
     }
 
     deinit {
         watcher?.stop()
+        liveRefreshTask?.cancel()
     }
 
     var rootUsage: DirectoryUsage? {
@@ -119,11 +121,12 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         fileQuery = ""
         lastError = nil
         statusMessage = ""
-        loadCachedSnapshot(startWatcher: true)
+        loadCachedSnapshot(startWatcher: false)
     }
 
     func scan() {
         guard !isScanning else { return }
+        let resumeWatchingAfterScan = isWatching
         stopWatching()
         isScanning = true
         lastError = nil
@@ -164,7 +167,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 if let updated {
                     apply(updated)
                     statusMessage = "Indexed \(updated.result.fileCount.formatted()) files"
-                    startWatching()
+                    if resumeWatchingAfterScan {
+                        startWatching(catchUpFromStoredCursor: true)
+                    }
                 }
             } catch {
                 lastError = String(describing: error)
@@ -246,8 +251,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     func toggleWatching() {
         if isWatching {
             stopWatching()
+            statusMessage = "Live paused"
         } else {
-            startWatching()
+            startWatching(catchUpFromStoredCursor: false)
         }
     }
 
@@ -255,8 +261,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         do {
             if let cached = try indexStore.load(rootPath: rootPath) {
                 apply(cached)
-                statusMessage = "Loaded cached index"
-                if startWatcher { self.startWatching() }
+                statusMessage = startWatcher ? "Loaded cached index" : "Loaded cached index · Live paused"
+                if startWatcher { self.startWatching(catchUpFromStoredCursor: true) }
             } else {
                 statusMessage = "No index yet — run Scan"
             }
@@ -286,12 +292,21 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func startWatching() {
+    private func startWatching(catchUpFromStoredCursor: Bool = false) {
         guard watcher == nil, snapshot != nil else { return }
         do {
-            guard let cursor = try indexStore.lastEventID(rootPath: rootPath) else {
-                statusMessage = "Run Scan once to enable live updates"
-                return
+            let cursor: UInt64
+            if catchUpFromStoredCursor {
+                guard let storedCursor = try indexStore.lastEventID(rootPath: rootPath) else {
+                    statusMessage = "Run Scan once to enable live updates"
+                    return
+                }
+                cursor = storedCursor
+            } else {
+                // Live is opt-in. Do not replay an arbitrarily large backlog accumulated while
+                // monitoring was paused; Rescan is the explicit way to reconcile older changes.
+                cursor = UInt64(FSEventsGetCurrentEventId())
+                try indexStore.saveLastEventID(cursor, rootPath: rootPath)
             }
 
             let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
@@ -318,15 +333,12 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                     do {
                         let sync = try updater.synchronize(changes: changes)
                         guard !sync.refreshedPaths.isEmpty || sync.fullRescan else { return }
-                        guard let refreshed = try indexStore.load(rootPath: root) else { return }
                         Task { @MainActor in
                             guard let model = modelBox.value else { return }
-                            model.apply(refreshed)
-                            if sync.fullRescan {
-                                model.statusMessage = "Live index rebuilt"
-                            } else {
-                                model.statusMessage = "Updated \(sync.refreshedPaths.count) changed area(s)"
-                            }
+                            let message = sync.fullRescan
+                                ? "Live index rebuilt"
+                                : "Updated \(sync.refreshedPaths.count) changed area(s)"
+                            model.scheduleLiveRefresh(message: message)
                         }
                     } catch {
                         Task { @MainActor in
@@ -340,6 +352,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             try watcher.start()
             self.watcher = watcher
             isWatching = true
+            statusMessage = "Live monitoring enabled"
         } catch {
             lastError = String(describing: error)
             isWatching = false
@@ -349,7 +362,34 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private func stopWatching() {
         watcher?.stop()
         watcher = nil
+        liveRefreshTask?.cancel()
+        liveRefreshTask = nil
         isWatching = false
+    }
+
+    private func scheduleLiveRefresh(message: String) {
+        liveRefreshTask?.cancel()
+        let indexStore = self.indexStore
+        let root = rootPath
+
+        liveRefreshTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                let refreshed = try await Task.detached(priority: .utility) {
+                    try indexStore.load(rootPath: root)
+                }.value
+                guard !Task.isCancelled, let refreshed, let self else { return }
+                self.apply(refreshed)
+                self.statusMessage = message
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self else { return }
+                self.lastError = String(describing: error)
+                self.statusMessage = "Live display refresh failed"
+            }
+        }
     }
 
     private static func defaultIndexURL() -> URL {

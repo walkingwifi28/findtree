@@ -174,6 +174,77 @@ public final class ScanIndexStore: @unchecked Sendable {
         }
     }
 
+    public func applyFileDeltas(
+        rootPath: String,
+        deltas: [FileIndexDelta],
+        indexedAt: Date = Date()
+    ) throws {
+        guard !deltas.isEmpty else { return }
+        let root = standardized(rootPath)
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+            throw ScanIndexError.missingIndex
+        }
+
+        var byDirectory: [String: (logical: Int64, allocated: Int64, files: Int64)] = [:]
+        var totalLogical: Int64 = 0
+        var totalAllocated: Int64 = 0
+        var totalFiles: Int64 = 0
+
+        for delta in deltas {
+            let parent = standardized(delta.parentPath)
+            guard isDescendantOrEqual(parent, of: root) else { continue }
+            totalLogical += delta.logicalDelta
+            totalAllocated += delta.allocatedDelta
+            totalFiles += delta.fileCountDelta
+
+            var current = parent
+            while isDescendantOrEqual(current, of: root) {
+                var aggregate = byDirectory[current] ?? (0, 0, 0)
+                aggregate.logical += delta.logicalDelta
+                aggregate.allocated += delta.allocatedDelta
+                aggregate.files += delta.fileCountDelta
+                byDirectory[current] = aggregate
+                if current == root { break }
+                let next = (current as NSString).deletingLastPathComponent
+                if next == current { break }
+                current = next
+            }
+        }
+
+        guard !byDirectory.isEmpty else { return }
+        let db = try openDatabase()
+        defer { sqlite3_close(db) }
+        try configure(db)
+        try createSchema(db)
+        try execute(db, sql: "BEGIN IMMEDIATE TRANSACTION")
+        do {
+            for (directory, aggregate) in byDirectory {
+                try applyDelta(
+                    db,
+                    rootPath: root,
+                    directoryPath: directory,
+                    logicalDelta: aggregate.logical,
+                    allocatedDelta: aggregate.allocated,
+                    fileDelta: aggregate.files,
+                    directoryDelta: 0
+                )
+            }
+            try updateMetadataDelta(
+                db,
+                rootPath: root,
+                indexedAt: indexedAt,
+                logicalDelta: totalLogical,
+                allocatedDelta: totalAllocated,
+                fileDelta: totalFiles,
+                directoryDelta: 0
+            )
+            try execute(db, sql: "COMMIT")
+        } catch {
+            try? execute(db, sql: "ROLLBACK")
+            throw error
+        }
+    }
+
     public func lastEventID(rootPath: String) throws -> UInt64? {
         guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
         let db = try openDatabase(readOnly: true)
@@ -198,7 +269,8 @@ public final class ScanIndexStore: @unchecked Sendable {
         let sql = """
         INSERT INTO event_cursors (root_path, last_event_id)
         VALUES (?, ?)
-        ON CONFLICT(root_path) DO UPDATE SET last_event_id = excluded.last_event_id
+        ON CONFLICT(root_path) DO UPDATE SET
+            last_event_id = MAX(event_cursors.last_event_id, excluded.last_event_id)
         """
         var statement: OpaquePointer?
         try check(sqlite3_prepare_v2(db, sql, -1, &statement, nil), db: db)

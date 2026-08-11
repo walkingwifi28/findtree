@@ -53,7 +53,21 @@ import Testing
     ]
 
     let paths = IncrementalIndexUpdater.coalescedRefreshPaths(for: changes, rootPath: root)
-    #expect(Set(paths) == Set(["\(root)/alpha", "\(root)/gamma"]))
+    #expect(paths.isEmpty)
+}
+
+@Test func keepsStructuralDirectoryAndMustScanEvents() {
+    let root = "/tmp/findtree-root"
+    let createdDir = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagItemCreated)
+    let mustScan = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagUserDropped)
+
+    let changes = [
+        FileSystemChange(path: "\(root)/created", flags: createdDir, eventID: 10),
+        FileSystemChange(path: "\(root)/damaged", flags: mustScan, eventID: 11)
+    ]
+
+    let paths = IncrementalIndexUpdater.coalescedRefreshPaths(for: changes, rootPath: root)
+    #expect(Set(paths) == Set(["\(root)/created", "\(root)/damaged"]))
 }
 
 @Test func persistsFSEventCursor() throws {
@@ -64,6 +78,7 @@ import Testing
 
     let store = ScanIndexStore(databaseURL: dbURL)
     try store.saveLastEventID(9_876_543_210, rootPath: tempRoot.path)
+    try store.saveLastEventID(100, rootPath: tempRoot.path)
     #expect(try store.lastEventID(rootPath: tempRoot.path) == 9_876_543_210)
 }
 

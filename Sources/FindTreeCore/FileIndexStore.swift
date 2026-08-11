@@ -1,6 +1,38 @@
 import Foundation
 import SQLite3
 import Darwin
+import Dispatch
+
+private final class FileIndexAccessCoordinator: @unchecked Sendable {
+    static let shared = FileIndexAccessCoordinator()
+
+    private let lock = NSLock()
+    private var gates: [String: DispatchSemaphore] = [:]
+
+    func gate(for databaseURL: URL) -> DispatchSemaphore {
+        let key = databaseURL.standardizedFileURL.path
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = gates[key] { return existing }
+        let gate = DispatchSemaphore(value: 1)
+        gates[key] = gate
+        return gate
+    }
+}
+
+public struct FileIndexDelta: Sendable, Equatable {
+    public let parentPath: String
+    public let logicalDelta: Int64
+    public let allocatedDelta: Int64
+    public let fileCountDelta: Int64
+
+    public init(parentPath: String, logicalDelta: Int64, allocatedDelta: Int64, fileCountDelta: Int64) {
+        self.parentPath = parentPath
+        self.logicalDelta = logicalDelta
+        self.allocatedDelta = allocatedDelta
+        self.fileCountDelta = fileCountDelta
+    }
+}
 
 public final class FileIndexStore: @unchecked Sendable {
     private let baseDatabaseURL: URL
@@ -46,6 +78,9 @@ public final class FileIndexStore: @unchecked Sendable {
         guard limit > 0 else { return [] }
         let root = PathUtilities.standardized(rootPath)
         let url = databaseURL(rootPath: root)
+        let accessGate = FileIndexAccessCoordinator.shared.gate(for: url)
+        accessGate.wait()
+        defer { accessGate.signal() }
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
 
         let db = try openReadOnly(url)
@@ -128,6 +163,136 @@ public final class FileIndexStore: @unchecked Sendable {
         return files
     }
 
+    public func applyFileChanges(rootPath: String, filePaths: [String]) throws -> [FileIndexDelta] {
+        guard !filePaths.isEmpty else { return [] }
+        let root = PathUtilities.standardized(rootPath)
+        let url = databaseURL(rootPath: root)
+        let accessGate = FileIndexAccessCoordinator.shared.gate(for: url)
+        accessGate.wait()
+        defer { accessGate.signal() }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw FileIndexError.missingIndex
+        }
+
+        let db = try openReadWrite(url)
+        defer { sqlite3_close(db) }
+        try execute(db, "PRAGMA journal_mode=WAL")
+        try execute(db, "PRAGMA synchronous=NORMAL")
+        try execute(db, "PRAGMA temp_store=MEMORY")
+        guard try loadStoredRoot(db) == root else { throw FileIndexError.rootMismatch }
+
+        var selectStatement: OpaquePointer?
+        var upsertStatement: OpaquePointer?
+        var deleteStatement: OpaquePointer?
+        try check(sqlite3_prepare_v2(
+            db,
+            "SELECT logical_bytes, allocated_bytes FROM files WHERE parent_relative = ? AND name = ?",
+            -1,
+            &selectStatement,
+            nil
+        ), db: db)
+        defer { sqlite3_finalize(selectStatement) }
+
+        try check(sqlite3_prepare_v2(
+            db,
+            "INSERT OR REPLACE INTO files(parent_relative, name, logical_bytes, allocated_bytes) VALUES (?, ?, ?, ?)",
+            -1,
+            &upsertStatement,
+            nil
+        ), db: db)
+        defer { sqlite3_finalize(upsertStatement) }
+
+        try check(sqlite3_prepare_v2(
+            db,
+            "DELETE FROM files WHERE parent_relative = ? AND name = ?",
+            -1,
+            &deleteStatement,
+            nil
+        ), db: db)
+        defer { sqlite3_finalize(deleteStatement) }
+
+        try execute(db, "BEGIN IMMEDIATE TRANSACTION")
+        do {
+            var deltas: [FileIndexDelta] = []
+            deltas.reserveCapacity(filePaths.count)
+
+            for rawPath in Set(filePaths) {
+                let path = PathUtilities.standardized(rawPath)
+                guard PathUtilities.isDescendantOrEqual(path, of: root), path != root else { continue }
+                let parent = (path as NSString).deletingLastPathComponent
+                let name = (path as NSString).lastPathComponent
+                let parentRelative = parent == root ? "" : String(parent.dropFirst(root.count + 1))
+
+                sqlite3_reset(selectStatement)
+                sqlite3_clear_bindings(selectStatement)
+                try bindText(parentRelative, at: 1, statement: selectStatement, db: db)
+                try bindText(name, at: 2, statement: selectStatement, db: db)
+                let selectStep = sqlite3_step(selectStatement)
+                let oldExists = selectStep == SQLITE_ROW
+                if selectStep != SQLITE_ROW && selectStep != SQLITE_DONE {
+                    try check(selectStep, db: db)
+                }
+                let oldLogical = oldExists ? sqlite3_column_int64(selectStatement, 0) : 0
+                let oldAllocated = oldExists ? sqlite3_column_int64(selectStatement, 1) : 0
+
+                let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [
+                    .isRegularFileKey,
+                    .isSymbolicLinkKey,
+                    .fileSizeKey,
+                    .fileAllocatedSizeKey
+                ])
+                let newExists = values?.isRegularFile == true && values?.isSymbolicLink != true
+                let newLogical = newExists ? Int64(max(values?.fileSize ?? 0, 0)) : 0
+                let newAllocated = newExists ? Int64(max(values?.fileAllocatedSize ?? values?.fileSize ?? 0, 0)) : 0
+
+                if newExists {
+                    sqlite3_reset(upsertStatement)
+                    sqlite3_clear_bindings(upsertStatement)
+                    try bindText(parentRelative, at: 1, statement: upsertStatement, db: db)
+                    try bindText(name, at: 2, statement: upsertStatement, db: db)
+                    sqlite3_bind_int64(upsertStatement, 3, newLogical)
+                    sqlite3_bind_int64(upsertStatement, 4, newAllocated)
+                    try checkDone(sqlite3_step(upsertStatement), db: db)
+                } else if oldExists {
+                    sqlite3_reset(deleteStatement)
+                    sqlite3_clear_bindings(deleteStatement)
+                    try bindText(parentRelative, at: 1, statement: deleteStatement, db: db)
+                    try bindText(name, at: 2, statement: deleteStatement, db: db)
+                    try checkDone(sqlite3_step(deleteStatement), db: db)
+                }
+
+                let fileCountDelta: Int64 = newExists == oldExists ? 0 : (newExists ? 1 : -1)
+                let logicalDelta = newLogical - oldLogical
+                let allocatedDelta = newAllocated - oldAllocated
+                if fileCountDelta != 0 || logicalDelta != 0 || allocatedDelta != 0 {
+                    deltas.append(FileIndexDelta(
+                        parentPath: parent,
+                        logicalDelta: logicalDelta,
+                        allocatedDelta: allocatedDelta,
+                        fileCountDelta: fileCountDelta
+                    ))
+                }
+            }
+
+            try execute(db, "COMMIT")
+            return deltas
+        } catch {
+            try? execute(db, "ROLLBACK")
+            throw error
+        }
+    }
+
+    private func openReadWrite(_ url: URL) throws -> OpaquePointer {
+        var db: OpaquePointer?
+        let status = sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
+        guard status == SQLITE_OK, let db else {
+            if let db { sqlite3_close(db) }
+            throw FileIndexError.sqlite("Could not open file index")
+        }
+        sqlite3_busy_timeout(db, 5_000)
+        return db
+    }
+
     private func openReadOnly(_ url: URL) throws -> OpaquePointer {
         var db: OpaquePointer?
         let status = sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
@@ -135,6 +300,7 @@ public final class FileIndexStore: @unchecked Sendable {
             if let db { sqlite3_close(db) }
             throw FileIndexError.sqlite("Could not open file index")
         }
+        sqlite3_busy_timeout(db, 5_000)
         return db
     }
 
@@ -166,6 +332,8 @@ public final class FileIndexWriter: @unchecked Sendable {
     private let workingURL: URL
     private let rootPath: String
     private let fullRebuild: Bool
+    private let accessGate: DispatchSemaphore
+    private var accessGateReleased = false
     private var db: OpaquePointer?
     private var insertStatement: OpaquePointer?
     private var completed = false
@@ -182,6 +350,14 @@ public final class FileIndexWriter: @unchecked Sendable {
         self.workingURL = fullRebuild
             ? databaseURL.deletingLastPathComponent().appendingPathComponent(".\(databaseURL.lastPathComponent).build-\(UUID().uuidString)")
             : databaseURL
+        self.accessGate = FileIndexAccessCoordinator.shared.gate(for: databaseURL)
+        self.accessGate.wait()
+        var initializationSucceeded = false
+        defer {
+            if !initializationSucceeded {
+                self.accessGate.signal()
+            }
+        }
 
         try FileManager.default.createDirectory(
             at: databaseURL.deletingLastPathComponent(),
@@ -232,6 +408,7 @@ public final class FileIndexWriter: @unchecked Sendable {
             if fullRebuild { try? FileManager.default.removeItem(at: workingURL) }
             throw error
         }
+        initializationSucceeded = true
     }
 
     deinit {
@@ -262,6 +439,7 @@ public final class FileIndexWriter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard !completed, let db else { return }
+        defer { releaseAccessGateIfNeeded() }
         sqlite3_finalize(insertStatement)
         insertStatement = nil
 
@@ -292,6 +470,7 @@ public final class FileIndexWriter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard !completed, let db else { return }
+        defer { releaseAccessGateIfNeeded() }
         sqlite3_finalize(insertStatement)
         insertStatement = nil
         try? execute(db, "ROLLBACK")
@@ -299,6 +478,12 @@ public final class FileIndexWriter: @unchecked Sendable {
         sqlite3_close(db)
         self.db = nil
         if fullRebuild { try? FileManager.default.removeItem(at: workingURL) }
+    }
+
+    private func releaseAccessGateIfNeeded() {
+        guard !accessGateReleased else { return }
+        accessGateReleased = true
+        accessGate.signal()
     }
 
     private static func open(_ url: URL, create: Bool) throws -> OpaquePointer {

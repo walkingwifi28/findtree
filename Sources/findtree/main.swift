@@ -298,6 +298,9 @@ private func runWatchMode(
                         fputs(String(format: "\nFSEvents overflow/root change: full rescan completed in %.3f s\n", sync.elapsedSeconds), stderr)
                     } else if !sync.refreshedPaths.isEmpty {
                         fputs(String(format: "\nIncremental refresh: %d subtree(s) in %.3f s\n", sync.refreshedPaths.count, sync.elapsedSeconds), stderr)
+                        for path in sync.refreshedPaths.prefix(10) {
+                            fputs("  - \(path)\n", stderr)
+                        }
                     }
 
                     if let updated = try indexStore.load(rootPath: rootURL.path), !sync.refreshedPaths.isEmpty || sync.fullRescan {

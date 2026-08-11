@@ -55,104 +55,163 @@ public final class IncrementalIndexUpdater: @unchecked Sendable {
 
     public func synchronize(changes: [FileSystemChange]) throws -> IncrementalSyncResult {
         let startedAt = ContinuousClock.now
-        let relevant = changes.compactMap(logicalChange)
-        let maxEventID = relevant.map(\.eventID).max()
+        let storedCursor = try store.lastEventID(rootPath: rootURL.path)
+        let pendingChanges: [FileSystemChange]
+        if let storedCursor {
+            pendingChanges = changes.filter { UInt64($0.eventID) > storedCursor }
+        } else {
+            pendingChanges = changes
+        }
+
+        guard !pendingChanges.isEmpty else {
+            return IncrementalSyncResult(
+                fullRescan: false,
+                refreshedPaths: [],
+                elapsedSeconds: secondsSince(startedAt),
+                lastEventID: storedCursor
+            )
+        }
+
+        let batchMaxEventID = pendingChanges.map { UInt64($0.eventID) }.max()
+        let relevant = pendingChanges.compactMap(logicalChange)
 
         if relevant.isEmpty {
-            if let maxEventID = changes.map(\.eventID).max() {
-                try store.saveLastEventID(maxEventID, rootPath: rootURL.path)
+            if let batchMaxEventID {
+                try store.saveLastEventID(batchMaxEventID, rootPath: rootURL.path)
             }
             return IncrementalSyncResult(
                 fullRescan: false,
                 refreshedPaths: [],
                 elapsedSeconds: secondsSince(startedAt),
-                lastEventID: changes.map(\.eventID).max()
+                lastEventID: batchMaxEventID
             )
         }
 
         if relevant.contains(where: { FSEventWatcher.eventRequiresFullRescan($0.flags) }) {
             let writer = try fileStore.makeFullWriter(rootPath: rootURL.path)
-            let result = try scanner.scan(
-                rootURL: rootURL,
-                options: scanOptions,
-                progressEvery: 0,
-                onFileBatch: { try writer.consume($0) }
-            )
-            try writer.finish()
-            try store.save(result)
-            if let maxEventID { try store.saveLastEventID(maxEventID, rootPath: rootURL.path) }
-            return IncrementalSyncResult(
-                fullRescan: true,
-                refreshedPaths: [rootURL.path],
-                elapsedSeconds: secondsSince(startedAt),
-                lastEventID: maxEventID
-            )
+            do {
+                let result = try scanner.scan(
+                    rootURL: rootURL,
+                    options: scanOptions,
+                    progressEvery: 0,
+                    onFileBatch: { try writer.consume($0) }
+                )
+                try writer.finish()
+                try store.save(result)
+
+                // The event history that triggered this rebuild is not trustworthy. The rebuilt
+                // snapshot is now our new baseline, so do not replay queued pre-rebuild batches.
+                let newCursor = UInt64(FSEventsGetCurrentEventId())
+                try store.saveLastEventID(newCursor, rootPath: rootURL.path)
+                return IncrementalSyncResult(
+                    fullRescan: true,
+                    refreshedPaths: [rootURL.path],
+                    elapsedSeconds: secondsSince(startedAt),
+                    lastEventID: newCursor
+                )
+            } catch {
+                writer.cancel()
+                throw error
+            }
         }
 
-        let paths = Self.coalescedRefreshPaths(for: relevant, rootPath: rootURL.path)
+        var paths = Self.coalescedRefreshPaths(for: relevant, rootPath: rootURL.path)
+        let canApplyFilesDirectly = fileStore.hasIndex(rootPath: rootURL.path)
+        if !canApplyFilesDirectly {
+            let fileParents = Self.directFilePaths(for: relevant, rootPath: rootURL.path).map {
+                ($0 as NSString).deletingLastPathComponent
+            }
+            paths = Self.coalescedCandidatePaths(paths + fileParents, rootPath: rootURL.path)
+        }
+
         for path in paths {
             let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
             var isDirectory: ObjCBool = false
             let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
 
             let writer = try fileStore.makeSubtreeWriter(rootPath: rootURL.path, subtreePath: url.path)
-            if exists && isDirectory.boolValue {
-                let subtree = try scanner.scan(
-                    rootURL: url,
-                    options: scanOptions,
-                    progressEvery: 0,
-                    onFileBatch: { try writer.consume($0) }
-                )
-                try writer.finish()
-                try store.replaceSubtree(rootPath: rootURL.path, subtreePath: url.path, with: subtree)
-            } else {
-                try writer.finish()
-                try store.replaceSubtree(rootPath: rootURL.path, subtreePath: url.path, with: nil)
+            do {
+                if exists && isDirectory.boolValue {
+                    let subtree = try scanner.scan(
+                        rootURL: url,
+                        options: scanOptions,
+                        progressEvery: 0,
+                        onFileBatch: { try writer.consume($0) }
+                    )
+                    try writer.finish()
+                    try store.replaceSubtree(rootPath: rootURL.path, subtreePath: url.path, with: subtree)
+                } else {
+                    try writer.finish()
+                    try store.replaceSubtree(rootPath: rootURL.path, subtreePath: url.path, with: nil)
+                }
+            } catch {
+                writer.cancel()
+                throw error
             }
         }
 
-        if let maxEventID {
-            try store.saveLastEventID(maxEventID, rootPath: rootURL.path)
+        var refreshedPaths = paths
+        if canApplyFilesDirectly {
+            let directFiles = Self.directFilePaths(for: relevant, rootPath: rootURL.path).filter { filePath in
+                !paths.contains { subtree in
+                    PathUtilities.isDescendantOrEqual(filePath, of: subtree)
+                }
+            }
+            if !directFiles.isEmpty {
+                let deltas = try fileStore.applyFileChanges(rootPath: rootURL.path, filePaths: directFiles)
+                try store.applyFileDeltas(rootPath: rootURL.path, deltas: deltas)
+                refreshedPaths.append(contentsOf: deltas.map(\.parentPath))
+                refreshedPaths = Self.coalescedCandidatePaths(refreshedPaths, rootPath: rootURL.path)
+            }
+        }
+
+        if let batchMaxEventID {
+            try store.saveLastEventID(batchMaxEventID, rootPath: rootURL.path)
         }
 
         return IncrementalSyncResult(
             fullRescan: false,
-            refreshedPaths: paths,
+            refreshedPaths: refreshedPaths,
             elapsedSeconds: secondsSince(startedAt),
-            lastEventID: maxEventID
+            lastEventID: batchMaxEventID
         )
     }
 
     /// Converts file-level FSEvents into the smallest non-overlapping directory set to rescan.
+    /// Pure directory metadata/modified notifications are intentionally ignored because item-level
+    /// events already identify the changed child. Treating those broad parent notifications as a
+    /// subtree refresh can turn a tiny cache write into a rescan of ~/Library or the entire root.
     public static func coalescedRefreshPaths(for changes: [FileSystemChange], rootPath: String) -> [String] {
         let root = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL.path
         let isDirFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir)
+        let mustScanFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)
+        let createdFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated)
         let removedFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemRemoved)
+        let renamedFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed)
+        let structuralDirFlags = createdFlag | removedFlag | renamedFlag
 
         var candidates = Set<String>()
         for change in changes {
             let path = URL(fileURLWithPath: change.path).standardizedFileURL.path
             guard path == root || path.hasPrefix(root.hasSuffix("/") ? root : root + "/") else { continue }
 
-            let itemWasDirectory = change.flags & isDirFlag != 0
-            let itemRemoved = change.flags & removedFlag != 0
             let candidate: String
-
-            if itemWasDirectory {
-                // A removed directory must be removed from the cached subtree by its old path.
-                // Existing/created directories can also be refreshed directly.
+            if change.flags & mustScanFlag != 0 {
+                candidate = path
+            } else if change.flags & isDirFlag != 0 {
+                guard change.flags & structuralDirFlags != 0 else {
+                    continue
+                }
                 candidate = path
             } else {
-                candidate = (path as NSString).deletingLastPathComponent
+                // Regular files are updated directly from their metadata and existing SQLite row.
+                // This avoids rescanning a large parent directory for a one-file change.
+                continue
             }
 
             if candidate == root || candidate.hasPrefix(root.hasSuffix("/") ? root : root + "/") {
                 candidates.insert(candidate)
             }
-
-            // A removed non-directory only requires its parent. The explicit branch is kept
-            // here to make deletion semantics obvious and avoid treating the missing file as a subtree.
-            _ = itemRemoved
         }
 
         let sorted = candidates.sorted {
@@ -166,6 +225,40 @@ public final class IncrementalIndexUpdater: @unchecked Sendable {
         for candidate in sorted {
             let covered = result.contains { ancestor in
                 candidate == ancestor || candidate.hasPrefix(ancestor.hasSuffix("/") ? ancestor : ancestor + "/")
+            }
+            if !covered { result.append(candidate) }
+        }
+        return result
+    }
+
+    private static func directFilePaths(for changes: [FileSystemChange], rootPath: String) -> [String] {
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL.path
+        let isFileFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile)
+        var result = Set<String>()
+        for change in changes where change.flags & isFileFlag != 0 {
+            let path = URL(fileURLWithPath: change.path).standardizedFileURL.path
+            guard PathUtilities.isDescendantOrEqual(path, of: root), path != root else { continue }
+            result.insert(path)
+        }
+        return Array(result)
+    }
+
+    private static func coalescedCandidatePaths(_ candidates: [String], rootPath: String) -> [String] {
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL.path
+        let sorted = Set(candidates.compactMap { candidate -> String? in
+            let path = URL(fileURLWithPath: candidate, isDirectory: true).standardizedFileURL.path
+            return PathUtilities.isDescendantOrEqual(path, of: root) ? path : nil
+        }).sorted {
+            let lhsDepth = $0.split(separator: "/").count
+            let rhsDepth = $1.split(separator: "/").count
+            if lhsDepth == rhsDepth { return $0 < $1 }
+            return lhsDepth < rhsDepth
+        }
+
+        var result: [String] = []
+        for candidate in sorted {
+            let covered = result.contains { ancestor in
+                PathUtilities.isDescendantOrEqual(candidate, of: ancestor)
             }
             if !covered { result.append(candidate) }
         }
