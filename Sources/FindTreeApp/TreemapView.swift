@@ -218,7 +218,7 @@ private struct TreemapTile: View {
     private var tileWidth: CGFloat { max(layout.rect.width - layout.gap * 2, 0) }
     private var tileHeight: CGFloat { max(layout.rect.height - layout.gap * 2, 0) }
     private var cornerRadius: CGFloat { layout.depth <= 1 ? 4 : 2 }
-    private var borderOpacity: Double { layout.depth <= 2 ? 0.34 : 0.24 }
+    private var borderOpacity: Double { 0.18 }
 
     private var shouldShowLabel: Bool {
         if layout.isTerminal {
@@ -452,117 +452,77 @@ private enum TreemapFileCategory: CaseIterable {
 
 private enum TreemapColor {
     static func legendColor(for category: TreemapFileCategory) -> Color {
-        let base = baseComponents(for: category)
-        return Color(hue: base.hue, saturation: base.saturation, brightness: base.brightness)
+        systemColor(for: category)
     }
 
     static func terminalColor(for entry: TreemapEntry) -> Color {
         switch entry {
         case .file(let file):
-            let category = TreemapFileCategory.classify(fileName: file.name)
-            return color(for: category, variationKey: fileExtensionKey(file.name))
+            return systemColor(for: TreemapFileCategory.classify(fileName: file.name))
 
         case .directory(let node):
             if let packageCategory = TreemapFileCategory.classify(directoryPath: node.usage.path) {
-                return color(for: packageCategory, variationKey: (node.usage.path as NSString).pathExtension)
+                return systemColor(for: packageCategory)
             }
 
             if let dominant = dominantFileCategory(in: node.files) {
-                return color(for: dominant.category, variationKey: dominant.extensionKey)
+                return systemColor(for: dominant)
             }
 
-            return color(for: .system, variationKey: "folder")
+            return systemColor(for: .system)
 
         case .aggregate(let aggregate):
             if aggregate.id.hasSuffix("#other-folders") {
-                return color(for: .system, variationKey: "folders")
+                return systemColor(for: .system)
             }
-            return color(for: .other, variationKey: "other-files")
+            return systemColor(for: .other)
         }
     }
 
-    private static func dominantFileCategory(
-        in files: [FileUsage]
-    ) -> (category: TreemapFileCategory, extensionKey: String)? {
+    private static func dominantFileCategory(in files: [FileUsage]) -> TreemapFileCategory? {
         guard !files.isEmpty else { return nil }
 
         var bytesByCategory: [TreemapFileCategory: UInt64] = [:]
-        var largestFileByCategory: [TreemapFileCategory: FileUsage] = [:]
-
         for file in files where file.allocatedBytes > 0 {
             let category = TreemapFileCategory.classify(fileName: file.name)
             bytesByCategory[category, default: 0] &+= file.allocatedBytes
-            if largestFileByCategory[category]?.allocatedBytes ?? 0 < file.allocatedBytes {
-                largestFileByCategory[category] = file
-            }
         }
 
-        guard let category = bytesByCategory.max(by: { $0.value < $1.value })?.key else {
-            return nil
-        }
-        let extensionKey = largestFileByCategory[category].map { fileExtensionKey($0.name) } ?? ""
-        return (category, extensionKey)
+        return bytesByCategory.max(by: { $0.value < $1.value })?.key
     }
 
-    private static func fileExtensionKey(_ fileName: String) -> String {
-        let ext = (fileName.lowercased() as NSString).pathExtension
-        return ext.isEmpty ? fileName.lowercased() : ext
-    }
-
-    private static func color(for category: TreemapFileCategory, variationKey: String) -> Color {
-        let base = baseComponents(for: category)
-        let variation = stableVariation(for: variationKey)
-        let hue = wrappedHue(base.hue + variation.hue)
-        let saturation = min(max(base.saturation + variation.saturation, 0.02), 0.58)
-        let brightness = min(max(base.brightness + variation.brightness, 0.54), 0.82)
-        return Color(hue: hue, saturation: saturation, brightness: brightness)
-    }
-
-    private static func baseComponents(
-        for category: TreemapFileCategory
-    ) -> (hue: Double, saturation: Double, brightness: Double) {
+    private static func systemColor(for category: TreemapFileCategory) -> Color {
+        let color: NSColor
         switch category {
         case .video:
-            return (0.585, 0.48, 0.72) // blue
+            color = .systemBlue
         case .image:
-            return (0.765, 0.42, 0.72) // purple
+            color = .systemPurple
         case .audio:
-            return (0.915, 0.40, 0.73) // pink
+            color = .systemPink
         case .archive:
-            return (0.080, 0.48, 0.76) // orange
+            color = .systemOrange
         case .application:
-            return (0.005, 0.44, 0.70) // red
+            color = .systemRed
         case .document:
-            return (0.350, 0.38, 0.68) // green
+            color = .systemGreen
         case .code:
-            return (0.505, 0.40, 0.68) // cyan
+            color = .systemCyan
         case .system:
-            return (0.600, 0.06, 0.60) // neutral gray
+            color = NSColor(name: nil) { appearance in
+                let match = appearance.bestMatch(from: [.darkAqua, .aqua])
+                if match == .darkAqua {
+                    return NSColor(srgbRed: 72.0 / 255.0, green: 72.0 / 255.0, blue: 74.0 / 255.0, alpha: 1.0)
+                }
+                return NSColor(srgbRed: 199.0 / 255.0, green: 199.0 / 255.0, blue: 204.0 / 255.0, alpha: 1.0)
+            }
         case .other:
-            return (0.145, 0.30, 0.72) // yellow / beige
-        }
-    }
-
-    private static func stableVariation(
-        for key: String
-    ) -> (hue: Double, saturation: Double, brightness: Double) {
-        var hash: UInt64 = 0xcbf29ce484222325
-        for byte in key.lowercased().utf8 {
-            hash ^= UInt64(byte)
-            hash &*= 0x100000001b3
+            color = .systemYellow
         }
 
-        // Keep extensions recognizably inside their category while avoiding a
-        // completely flat wall of one color.
-        let hue = (Double(Int(hash % 17) - 8) / 8.0) * 0.012
-        let saturation = (Double(Int((hash >> 8) % 9) - 4) / 4.0) * 0.035
-        let brightness = (Double(Int((hash >> 16) % 11) - 5) / 5.0) * 0.045
-        return (hue, saturation, brightness)
-    }
-
-    private static func wrappedHue(_ hue: Double) -> Double {
-        let value = hue.truncatingRemainder(dividingBy: 1.0)
-        return value < 0 ? value + 1.0 : value
+        // Keep the Apple system hue while letting the app background show through.
+        // This preserves readable primary/secondary labels in both light and dark mode.
+        return Color(nsColor: color).opacity(0.72)
     }
 }
 
