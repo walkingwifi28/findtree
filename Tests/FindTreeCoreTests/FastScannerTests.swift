@@ -48,3 +48,42 @@ import Testing
     #expect(result.fileCount == 1)
     #expect(result.logicalBytes == 512)
 }
+
+@Test func progressFinishesWithAllDirectoriesProcessed() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("findtree-progress-test-\(UUID().uuidString)", isDirectory: true)
+    let nested = root.appendingPathComponent("nested", isDirectory: true)
+    try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try Data(repeating: 0x11, count: 32).write(to: nested.appendingPathComponent("data.bin"))
+
+    final class ProgressBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: ScanProgress?
+
+        func set(_ progress: ScanProgress) {
+            lock.lock()
+            value = progress
+            lock.unlock()
+        }
+
+        func get() -> ScanProgress? {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
+    let box = ProgressBox()
+    _ = try FastScanner().scan(
+        rootURL: root,
+        progressEvery: 1,
+        onProgress: { box.set($0) }
+    )
+
+    let progress = try #require(box.get())
+    #expect(progress.files == 1)
+    #expect(progress.processedDirectories == progress.discoveredDirectories)
+    #expect(progress.discoveredDirectories == 2)
+}

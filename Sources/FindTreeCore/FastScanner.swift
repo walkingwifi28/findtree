@@ -19,12 +19,23 @@ public struct ScanOptions: Sendable {
 public struct ScanProgress: Sendable {
     public let files: Int
     public let directories: Int
+    public let processedDirectories: Int
+    public let discoveredDirectories: Int
     public let logicalBytes: UInt64
     public let allocatedBytes: UInt64
 
-    public init(files: Int, directories: Int, logicalBytes: UInt64, allocatedBytes: UInt64) {
+    public init(
+        files: Int,
+        directories: Int,
+        processedDirectories: Int = 0,
+        discoveredDirectories: Int = 0,
+        logicalBytes: UInt64,
+        allocatedBytes: UInt64
+    ) {
         self.files = files
         self.directories = directories
+        self.processedDirectories = processedDirectories
+        self.discoveredDirectories = discoveredDirectories
         self.logicalBytes = logicalBytes
         self.allocatedBytes = allocatedBytes
     }
@@ -172,6 +183,7 @@ public final class FastScanner: @unchecked Sendable {
         var seenEntries = 0
         var nextProgressAt = max(progressEvery, 1)
         var globalFileCount = 0
+        var processedDirectoryCount = 0
         var globalLogicalBytes: UInt64 = 0
         var globalAllocatedBytes: UInt64 = 0
 
@@ -220,9 +232,25 @@ public final class FastScanner: @unchecked Sendable {
 
             for directoryScan in collector.take() {
                 seenEntries += directoryScan.seenEntries
+                processedDirectoryCount += 1
 
                 if directoryScan.inaccessible {
                     inaccessibleDirectoryCount += 1
+                    if progressEvery > 0, seenEntries >= nextProgressAt {
+                        onProgress?(
+                            ScanProgress(
+                                files: globalFileCount,
+                                directories: max(nodes.count - 1, 0),
+                                processedDirectories: processedDirectoryCount,
+                                discoveredDirectories: pending.count,
+                                logicalBytes: globalLogicalBytes,
+                                allocatedBytes: globalAllocatedBytes
+                            )
+                        )
+                        while nextProgressAt <= seenEntries {
+                            nextProgressAt += progressEvery
+                        }
+                    }
                     continue
                 }
 
@@ -252,6 +280,8 @@ public final class FastScanner: @unchecked Sendable {
                         ScanProgress(
                             files: globalFileCount,
                             directories: max(nodes.count - 1, 0),
+                            processedDirectories: processedDirectoryCount,
+                            discoveredDirectories: pending.count,
                             logicalBytes: globalLogicalBytes,
                             allocatedBytes: globalAllocatedBytes
                         )
@@ -281,6 +311,19 @@ public final class FastScanner: @unchecked Sendable {
                 allocatedBytes: nodes[index].allocatedBytes,
                 fileCount: nodes[index].fileCount,
                 directoryCount: nodes[index].directoryCount
+            )
+        }
+
+        if progressEvery > 0 {
+            onProgress?(
+                ScanProgress(
+                    files: nodes[0].fileCount,
+                    directories: max(nodes.count - 1, 0),
+                    processedDirectories: processedDirectoryCount,
+                    discoveredDirectories: pending.count,
+                    logicalBytes: nodes[0].logicalBytes,
+                    allocatedBytes: nodes[0].allocatedBytes
+                )
             )
         }
 

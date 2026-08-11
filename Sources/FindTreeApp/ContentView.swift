@@ -35,15 +35,18 @@ struct ContentView: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            if model.isScanning {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Scanning")
-                    .foregroundStyle(.secondary)
-            }
-
             Button(action: model.scan) {
-                Label(model.snapshot == nil ? "Scan" : "Rescan", systemImage: "arrow.clockwise")
+                if model.isScanning {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("\(model.scanProgressPercent ?? 0)%")
+                            .monospacedDigit()
+                    }
+                    .frame(minWidth: 62)
+                } else {
+                    Label(model.snapshot == nil ? "Scan" : "Rescan", systemImage: "arrow.clockwise")
+                }
             }
             .disabled(model.isScanning)
             .keyboardShortcut("r", modifiers: [.command])

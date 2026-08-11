@@ -16,6 +16,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var snapshot: IndexedScanSnapshot?
     @Published var totalCapacityBytes: UInt64?
     @Published var isScanning = false
+    @Published var scanProgressPercent: Int?
     @Published var isWatching = false
     @Published var statusMessage = ""
     @Published var lastError: String?
@@ -97,6 +98,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         childrenByParent = [:]
         usageByPath = [:]
         lastError = nil
+        scanProgressPercent = nil
         statusMessage = ""
         loadCachedSnapshot(startWatcher: false)
     }
@@ -106,9 +108,12 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let resumeWatchingAfterScan = isWatching
         stopWatching()
         isScanning = true
+        scanProgressPercent = 0
         lastError = nil
         statusMessage = "Scanning…"
 
+        let expectedEntries = snapshot.map { $0.result.fileCount + $0.result.directoryCount } ?? 0
+        let modelBox = WeakAppModelBox(self)
         let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
         let scanner = self.scanner
         let indexStore = self.indexStore
@@ -128,7 +133,12 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                                 includeHiddenFiles: true,
                                 workerCount: workerCount
                             ),
-                            progressEvery: 0,
+                            progressEvery: 5_000,
+                            onProgress: { progress in
+                                Task { @MainActor in
+                                    modelBox.value?.updateScanProgress(progress, expectedEntries: expectedEntries)
+                                }
+                            },
                             onFileBatch: { try writer.consume($0) }
                         )
                         try writer.finish()
@@ -153,7 +163,30 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 statusMessage = "Scan failed"
             }
             isScanning = false
+            scanProgressPercent = nil
         }
+    }
+
+    private func updateScanProgress(_ progress: ScanProgress, expectedEntries: Int) {
+        let isComplete = progress.discoveredDirectories > 0
+            && progress.processedDirectories >= progress.discoveredDirectories
+
+        let calculated: Int
+        if isComplete {
+            calculated = 100
+        } else if expectedEntries > 0 {
+            let processedEntries = progress.files + progress.processedDirectories
+            calculated = Int((Double(processedEntries) / Double(expectedEntries)) * 100.0)
+        } else if progress.discoveredDirectories > 0 {
+            calculated = Int(
+                (Double(progress.processedDirectories) / Double(progress.discoveredDirectories)) * 100.0
+            )
+        } else {
+            calculated = 0
+        }
+
+        let bounded = min(max(calculated, 0), isComplete ? 100 : 99)
+        scanProgressPercent = max(scanProgressPercent ?? 0, bounded)
     }
 
     func navigate(to directory: DirectoryUsage) {
