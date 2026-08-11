@@ -482,10 +482,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         refreshTreemapFiles()
     }
 
-    func revealCurrentDirectory() {
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: currentDirectory)])
-    }
-
     func revealFile(_ file: FileUsage) {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
     }

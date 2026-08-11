@@ -62,12 +62,10 @@ struct ContentView: View {
             .disabled(model.isScanning)
             .keyboardShortcut("r", modifiers: [.command])
 
-            Menu {
-                Button("Reveal Current Folder in Finder", action: model.revealCurrentDirectory)
-                Button("Full Disk Access Settings", action: model.openFullDiskAccessSettings)
-            } label: {
+            Button(action: {}) {
                 Image(systemName: "ellipsis.circle")
             }
+            .disabled(true)
         }
         .padding(12)
     }
