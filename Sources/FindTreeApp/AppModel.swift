@@ -9,6 +9,152 @@ private final class WeakAppModelBox: @unchecked Sendable {
     init(_ value: AppModel) { self.value = value }
 }
 
+private struct PreparedSnapshot: Sendable {
+    let snapshot: IndexedScanSnapshot
+    let usageByPath: [String: DirectoryUsage]
+    let childrenByParent: [String: [DirectoryUsage]]
+    let treemapFilesByParent: [String: [FileUsage]]?
+}
+
+private func prepareSnapshot(_ snapshot: IndexedScanSnapshot) -> PreparedSnapshot {
+    var pathMap: [String: DirectoryUsage] = [:]
+    pathMap.reserveCapacity(snapshot.result.directories.count)
+    var childMap: [String: [DirectoryUsage]] = [:]
+    childMap.reserveCapacity(snapshot.result.directories.count / 2)
+
+    for usage in snapshot.result.directories {
+        pathMap[usage.path] = usage
+        if usage.path != snapshot.result.rootPath {
+            let parent = parentPath(of: usage.path)
+            childMap[parent, default: []].append(usage)
+        }
+    }
+
+    return PreparedSnapshot(
+        snapshot: snapshot,
+        usageByPath: pathMap,
+        childrenByParent: childMap,
+        treemapFilesByParent: nil
+    )
+}
+
+private func prepareSnapshotForInitialTreemap(
+    _ snapshot: IndexedScanSnapshot,
+    fileStore: FileIndexStore,
+    currentDirectory: String
+) -> PreparedSnapshot {
+    let prepared = prepareSnapshot(snapshot)
+    guard fileStore.hasIndex(rootPath: snapshot.result.rootPath),
+          let usage = prepared.usageByPath[currentDirectory],
+          usage.allocatedBytes > 0
+    else {
+        return PreparedSnapshot(
+            snapshot: prepared.snapshot,
+            usageByPath: prepared.usageByPath,
+            childrenByParent: prepared.childrenByParent,
+            treemapFilesByParent: [:]
+        )
+    }
+
+    let minimumVisibleBytes = max(usage.allocatedBytes / 100_000, 256 * 1_024)
+    var candidates: [(path: String, bytes: UInt64)] = []
+    collectTreemapFileCandidates(
+        usage: usage,
+        childrenByParent: prepared.childrenByParent,
+        depth: 0,
+        maxDepth: 6,
+        minimumVisibleBytes: minimumVisibleBytes,
+        into: &candidates
+    )
+    let parentPaths = candidates
+        .sorted { $0.bytes > $1.bytes }
+        .prefix(256)
+        .map(\.path)
+
+    guard !parentPaths.isEmpty else {
+        return PreparedSnapshot(
+            snapshot: prepared.snapshot,
+            usageByPath: prepared.usageByPath,
+            childrenByParent: prepared.childrenByParent,
+            treemapFilesByParent: [:]
+        )
+    }
+
+    do {
+        let files = try fileStore.filesForParents(
+            rootPath: snapshot.result.rootPath,
+            parentPaths: parentPaths,
+            limitPerParent: 64
+        )
+        return PreparedSnapshot(
+            snapshot: prepared.snapshot,
+            usageByPath: prepared.usageByPath,
+            childrenByParent: prepared.childrenByParent,
+            treemapFilesByParent: files
+        )
+    } catch {
+        // Keep cached startup usable even if the optional file-detail index needs recovery.
+        // The normal asynchronous refresh path will surface the error after the snapshot appears.
+        return prepared
+    }
+}
+
+private func collectTreemapFileCandidates(
+    usage: DirectoryUsage,
+    childrenByParent: [String: [DirectoryUsage]],
+    depth: Int,
+    maxDepth: Int,
+    minimumVisibleBytes: UInt64,
+    into result: inout [(path: String, bytes: UInt64)]
+) {
+    let allChildren = childrenByParent[usage.path] ?? []
+    let childBytes = allChildren.reduce(UInt64(0)) { $0 &+ $1.allocatedBytes }
+    let directBytes = usage.allocatedBytes > childBytes ? usage.allocatedBytes - childBytes : 0
+    if directBytes > 0 {
+        result.append((usage.path, directBytes))
+    }
+
+    guard depth < maxDepth else { return }
+
+    let childLimit: Int
+    switch depth {
+    case 0:
+        childLimit = 64
+    case 1...3:
+        childLimit = 192
+    default:
+        childLimit = 96
+    }
+
+    let children = allChildren
+        .filter { child in
+            child.allocatedBytes > 0
+                && (depth < 2 || child.allocatedBytes >= minimumVisibleBytes)
+        }
+        .sorted { lhs, rhs in
+            if lhs.allocatedBytes == rhs.allocatedBytes { return lhs.path < rhs.path }
+            return lhs.allocatedBytes > rhs.allocatedBytes
+        }
+        .prefix(childLimit)
+
+    for child in children {
+        collectTreemapFileCandidates(
+            usage: child,
+            childrenByParent: childrenByParent,
+            depth: depth + 1,
+            maxDepth: maxDepth,
+            minimumVisibleBytes: minimumVisibleBytes,
+            into: &result
+        )
+    }
+}
+
+private func parentPath(of path: String) -> String {
+    guard path != "/", let slash = path.lastIndex(of: "/") else { return "/" }
+    if slash == path.startIndex { return "/" }
+    return String(path[..<slash])
+}
+
 @MainActor
 final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var rootPath: String
@@ -28,6 +174,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private let syncQueue = DispatchQueue(label: "findtree.app.incremental-sync", qos: .utility)
     private var watcher: FSEventWatcher?
     private var liveRefreshTask: Task<Void, Never>?
+    private var cachedSnapshotTask: Task<Void, Never>?
     private var treemapFileTask: Task<Void, Never>?
     private var childrenByParent: [String: [DirectoryUsage]] = [:]
     private var usageByPath: [String: DirectoryUsage] = [:]
@@ -49,6 +196,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     deinit {
         watcher?.stop()
         liveRefreshTask?.cancel()
+        cachedSnapshotTask?.cancel()
         treemapFileTask?.cancel()
     }
 
@@ -221,6 +369,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func setRoot(_ path: String) {
         stopWatching()
+        cachedSnapshotTask?.cancel()
+        cachedSnapshotTask = nil
         let standardized = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
         rootPath = standardized
         currentDirectory = standardized
@@ -239,6 +389,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func scan() {
         guard !isScanning else { return }
+        cachedSnapshotTask?.cancel()
+        cachedSnapshotTask = nil
         let resumeWatchingAfterScan = isWatching
         stopWatching()
         isScanning = true
@@ -278,7 +430,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                         try writer.finish()
                         try indexStore.save(result)
                         try indexStore.saveLastEventID(cursorBeforeScan, rootPath: rootURL.path)
-                        return try indexStore.load(rootPath: rootURL.path)
+                        return try indexStore.load(rootPath: rootURL.path).map(prepareSnapshot)
                     } catch {
                         writer.cancel()
                         throw error
@@ -287,7 +439,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
                 if let updated {
                     apply(updated)
-                    statusMessage = "Indexed \(updated.result.fileCount.formatted()) files"
+                    statusMessage = "Indexed \(updated.snapshot.result.fileCount.formatted()) files"
                     if resumeWatchingAfterScan {
                         startWatching(catchUpFromStoredCursor: true)
                     }
@@ -348,6 +500,96 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
     }
 
+    func moveToTrash(_ url: URL) {
+        guard snapshot != nil, !isScanning else { return }
+
+        let itemURL = url.standardizedFileURL
+        let itemPath = itemURL.path
+        let root = rootPath
+        let rootPrefix = root == "/" ? "/" : root + "/"
+        guard itemPath != root, itemPath.hasPrefix(rootPrefix) else {
+            lastError = "The scan root cannot be moved to Trash."
+            return
+        }
+
+        var isDirectoryValue: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: itemPath, isDirectory: &isDirectoryValue) else {
+            lastError = "The item no longer exists: \(itemPath)"
+            return
+        }
+
+        let isDirectory = isDirectoryValue.boolValue
+        let itemName = itemURL.lastPathComponent
+        let indexStore = self.indexStore
+        let fileStore = self.fileStore
+        let scanner = self.scanner
+        let workerCount = min(8, max(2, ProcessInfo.processInfo.activeProcessorCount))
+        statusMessage = "Moving \(itemName) to Trash…"
+        lastError = nil
+
+        Task { [weak self] in
+            do {
+                let refreshed = try await Task.detached(priority: .userInitiated) { () -> PreparedSnapshot? in
+                    try FileManager.default.trashItem(at: itemURL, resultingItemURL: nil)
+
+                    if isDirectory {
+                        if fileStore.hasIndex(rootPath: root) {
+                            let writer = try fileStore.makeSubtreeWriter(
+                                rootPath: root,
+                                subtreePath: itemPath
+                            )
+                            do {
+                                try writer.finish()
+                            } catch {
+                                writer.cancel()
+                                throw error
+                            }
+                        }
+                        try indexStore.replaceSubtree(
+                            rootPath: root,
+                            subtreePath: itemPath,
+                            with: nil
+                        )
+                    } else if fileStore.hasIndex(rootPath: root) {
+                        let deltas = try fileStore.applyFileChanges(
+                            rootPath: root,
+                            filePaths: [itemPath]
+                        )
+                        try indexStore.applyFileDeltas(rootPath: root, deltas: deltas)
+                    } else {
+                        let parentPath = (itemPath as NSString).deletingLastPathComponent
+                        let parentURL = URL(fileURLWithPath: parentPath, isDirectory: true)
+                        let subtree = try scanner.scan(
+                            rootURL: parentURL,
+                            options: ScanOptions(
+                                stayOnRootVolume: true,
+                                includeHiddenFiles: true,
+                                workerCount: workerCount
+                            )
+                        )
+                        try indexStore.replaceSubtree(
+                            rootPath: root,
+                            subtreePath: parentPath,
+                            with: subtree
+                        )
+                    }
+
+                    return try indexStore.load(rootPath: root).map(prepareSnapshot)
+                }.value
+
+                guard let self, self.rootPath == root else { return }
+                if let refreshed {
+                    self.apply(refreshed)
+                }
+                self.statusMessage = "Moved \(itemName) to Trash"
+            } catch {
+                guard let self else { return }
+                self.lastError = String(describing: error)
+                self.statusMessage = "Move to Trash failed"
+            }
+        }
+    }
+
     func openFullDiskAccessSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
         NSWorkspace.shared.open(url)
@@ -363,39 +605,61 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func loadCachedSnapshot(startWatcher: Bool) {
-        do {
-            if let cached = try indexStore.load(rootPath: rootPath) {
-                apply(cached)
-                statusMessage = startWatcher ? "Loaded cached index" : "Loaded cached index · Live paused"
-                if startWatcher { self.startWatching(catchUpFromStoredCursor: true) }
-            } else {
-                statusMessage = "No index yet — run Scan"
+        let root = rootPath
+        let indexStore = self.indexStore
+        let fileStore = self.fileStore
+        statusMessage = "Loading cached index…"
+
+        cachedSnapshotTask?.cancel()
+        cachedSnapshotTask = Task { [weak self] in
+            do {
+                let prepared = try await Task.detached(priority: .userInitiated) { () -> PreparedSnapshot? in
+                    try indexStore.load(rootPath: root).map { snapshot in
+                        prepareSnapshotForInitialTreemap(
+                            snapshot,
+                            fileStore: fileStore,
+                            currentDirectory: root
+                        )
+                    }
+                }.value
+
+                guard !Task.isCancelled, let self, self.rootPath == root else { return }
+                if let prepared {
+                    self.apply(prepared)
+                    self.statusMessage = startWatcher
+                        ? "Loaded cached index"
+                        : "Loaded cached index · Live paused"
+                    if startWatcher {
+                        self.startWatching(catchUpFromStoredCursor: true)
+                    }
+                } else {
+                    self.statusMessage = "No index yet — run Scan"
+                }
+            } catch {
+                guard let self, self.rootPath == root else { return }
+                self.lastError = String(describing: error)
             }
-        } catch {
-            lastError = String(describing: error)
         }
     }
 
-    private func apply(_ snapshot: IndexedScanSnapshot) {
-        self.snapshot = snapshot
-        var pathMap: [String: DirectoryUsage] = [:]
-        pathMap.reserveCapacity(snapshot.result.directories.count)
-        var childMap: [String: [DirectoryUsage]] = [:]
+    private func apply(_ prepared: PreparedSnapshot) {
+        usageByPath = prepared.usageByPath
+        childrenByParent = prepared.childrenByParent
 
-        for usage in snapshot.result.directories {
-            pathMap[usage.path] = usage
-            if usage.path != snapshot.result.rootPath {
-                let parent = (usage.path as NSString).deletingLastPathComponent
-                childMap[parent, default: []].append(usage)
-            }
+        if let preloadedFiles = prepared.treemapFilesByParent {
+            treemapFileTask?.cancel()
+            treemapFileTask = nil
+            treemapFilesByParent = preloadedFiles
         }
-        usageByPath = pathMap
-        childrenByParent = childMap
 
+        snapshot = prepared.snapshot
         if currentDirectory != rootPath && usageByPath[currentDirectory] == nil {
             currentDirectory = rootPath
         }
-        refreshTreemapFiles()
+
+        if prepared.treemapFilesByParent == nil {
+            refreshTreemapFiles()
+        }
     }
 
     private func startWatching(catchUpFromStoredCursor: Bool = false) {
@@ -482,8 +746,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             do {
                 try await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { return }
-                let refreshed = try await Task.detached(priority: .utility) {
-                    try indexStore.load(rootPath: root)
+                let refreshed = try await Task.detached(priority: .utility) { () -> PreparedSnapshot? in
+                    try indexStore.load(rootPath: root).map(prepareSnapshot)
                 }.value
                 guard !Task.isCancelled, let refreshed, let self else { return }
                 self.apply(refreshed)

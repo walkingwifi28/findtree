@@ -15,6 +15,7 @@ struct TreemapView: View {
     let root: TreemapNode
     let onSelectDirectory: (DirectoryUsage) -> Void
     let onSelectFile: (FileUsage) -> Void
+    let onMoveToTrash: (URL) -> Void
 
 
     var body: some View {
@@ -34,7 +35,8 @@ struct TreemapView: View {
                     TreemapTile(
                         layout: layout,
                         onSelectDirectory: onSelectDirectory,
-                        onSelectFile: onSelectFile
+                        onSelectFile: onSelectFile,
+                        onMoveToTrash: onMoveToTrash
                     )
                 }
             }
@@ -102,12 +104,24 @@ private enum TreemapEntry: Identifiable {
             return aggregate.allocatedBytes
         }
     }
+
+    var finderURL: URL? {
+        switch self {
+        case .directory(let node):
+            return URL(fileURLWithPath: node.usage.path, isDirectory: true)
+        case .file(let file):
+            return URL(fileURLWithPath: file.path)
+        case .aggregate:
+            return nil
+        }
+    }
 }
 
 private struct TreemapTile: View {
     let layout: TreemapLayoutItem
     let onSelectDirectory: (DirectoryUsage) -> Void
     let onSelectFile: (FileUsage) -> Void
+    let onMoveToTrash: (URL) -> Void
 
     var body: some View {
         Button(action: handleSelection) {
@@ -130,6 +144,14 @@ private struct TreemapTile: View {
             }
         }
         .help(helpText)
+        .contextMenu {
+            if let finderURL = layout.entry.finderURL {
+                FinderContextMenu(url: finderURL, onMoveToTrash: onMoveToTrash)
+                    .onAppear {
+                        FastTreemapTooltipController.shared.hide()
+                    }
+            }
+        }
     }
 
     private var tileContent: some View {
@@ -150,7 +172,7 @@ private struct TreemapTile: View {
                             .font(labelFont)
                             .lineLimit(1)
                         Text(formatBytes(layout.entry.allocatedBytes))
-                            .font(.caption2)
+                            .font(sizeLabelFont)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -159,7 +181,6 @@ private struct TreemapTile: View {
                     Text(layout.entry.displayName + "  " + formatBytes(layout.entry.allocatedBytes))
                         .font(labelFont)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.75)
                         .padding(layout.depth <= 2 ? 6 : 4)
                 }
             }
@@ -193,7 +214,11 @@ private struct TreemapTile: View {
     }
 
     private var labelFont: Font {
-        layout.depth <= 2 ? .caption.weight(.semibold) : .caption2.weight(.medium)
+        .system(size: 10)
+    }
+
+    private var sizeLabelFont: Font {
+        .system(size: 10)
     }
 
     private var helpText: String {
@@ -202,7 +227,7 @@ private struct TreemapTile: View {
 }
 
 @MainActor
-private final class FastTreemapTooltipController {
+final class FastTreemapTooltipController {
     static let shared = FastTreemapTooltipController()
 
     private var pendingTask: Task<Void, Never>?
@@ -273,7 +298,7 @@ private final class FastTreemapTooltipController {
             backing: .buffered,
             defer: false
         )
-        panel.level = .popUpMenu
+        panel.level = .floating
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
@@ -330,7 +355,7 @@ private struct FastTreemapTooltipView: View {
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
             Text(size)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 11))
                 .monospacedDigit()
         }
         .padding(.horizontal, 8)

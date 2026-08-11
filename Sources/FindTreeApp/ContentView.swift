@@ -150,7 +150,8 @@ struct ContentView: View {
                 TreemapView(
                     root: treemapRoot,
                     onSelectDirectory: model.navigate,
-                    onSelectFile: model.revealFile
+                    onSelectFile: model.revealFile,
+                    onMoveToTrash: model.moveToTrash
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
