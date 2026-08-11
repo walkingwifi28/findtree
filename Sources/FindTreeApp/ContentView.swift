@@ -3,17 +3,22 @@ import FindTreeCore
 
 struct ContentView: View {
     @StateObject private var model = AppModel()
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(spacing: 0) {
-            toolbar
-            Divider()
-            summary
-            Divider()
+        ZStack {
+            NeumorphicTheme.surface(for: colorScheme)
+                .ignoresSafeArea()
 
-            storageView
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
+            VStack(spacing: 0) {
+                toolbar
+                summary
+
+                storageView
+                    .padding(.horizontal, 18)
+                    .padding(.top, 6)
+                    .padding(.bottom, 18)
+            }
         }
         .frame(minWidth: 980, minHeight: 680)
         .alert("Full Disk Access is not enabled", isPresented: $model.shouldShowFullDiskAccessNotice) {
@@ -35,16 +40,18 @@ struct ContentView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 14) {
             Button(action: model.chooseRootFolder) {
                 Label("Folder", systemImage: "folder")
             }
+            .buttonStyle(NeumorphicButtonStyle())
 
             Text(model.rootPath)
                 .font(.system(.body, design: .monospaced))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 4)
 
             Button(action: model.scan) {
                 if model.isScanning {
@@ -59,37 +66,53 @@ struct ContentView: View {
                     Label(model.snapshot == nil ? "Scan" : "Rescan", systemImage: "arrow.clockwise")
                 }
             }
+            .buttonStyle(NeumorphicButtonStyle())
             .disabled(model.isScanning)
             .keyboardShortcut("r", modifiers: [.command])
 
             Button(action: {}) {
-                Image(systemName: "ellipsis.circle")
+                Image(systemName: "ellipsis")
+                    .frame(width: 16)
             }
+            .buttonStyle(
+                NeumorphicButtonStyle(
+                    cornerRadius: 12,
+                    horizontalPadding: 10,
+                    verticalPadding: 9
+                )
+            )
             .disabled(true)
         }
-        .padding(12)
+        .padding(.horizontal, 18)
+        .padding(.top, 18)
+        .padding(.bottom, 10)
     }
 
     @ViewBuilder
     private var summary: some View {
         if let result = model.snapshot?.result {
-            HStack(spacing: 12) {
+            HStack(spacing: 14) {
                 SummaryCard(title: "Capacity", value: model.totalCapacityBytes.map(formatBytes) ?? "—", systemImage: "externaldrive")
                 SummaryCard(title: "Volume Used", value: model.volumeUsedBytes.map(formatBytes) ?? "—", systemImage: "chart.pie")
                 SummaryCard(title: "Free", value: model.volumeFreeBytes.map(formatBytes) ?? "—", systemImage: "circle.dashed")
                 SummaryCard(title: "Files", value: result.fileCount.formatted(), systemImage: "doc")
                 SummaryCard(title: "Folders", value: result.directoryCount.formatted(), systemImage: "folder")
-
             }
-            .padding(12)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
         } else {
-            HStack {
+            HStack(spacing: 10) {
                 Image(systemName: "externaldrive.badge.questionmark")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.secondary)
                 Text(model.statusMessage.isEmpty ? "Choose a folder and run Scan." : model.statusMessage)
                     .foregroundStyle(.secondary)
                 Spacer()
             }
             .padding(14)
+            .neumorphicRaised(cornerRadius: 16, shadowRadius: 7, distance: 5, strength: 0.72)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
         }
     }
 
@@ -111,6 +134,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -128,13 +152,13 @@ private struct SummaryCard: View {
     let systemImage: String
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 11) {
             Image(systemName: systemImage)
-                .font(.system(size: 18))
+                .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(.secondary)
-                .frame(width: 22)
+                .frame(width: 24)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -144,7 +168,7 @@ private struct SummaryCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 }

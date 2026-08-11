@@ -193,7 +193,9 @@ private struct TreemapTile: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
-                    .padding(layout.depth <= 2 ? 6 : 4)
+                    .padding(.horizontal, layout.depth <= 2 ? 8 : 6)
+                    .padding(.top, layout.depth <= 2 ? 7 : 5)
+                    .padding(.bottom, layout.depth <= 2 ? 6 : 4)
                 } else {
                     HStack(spacing: 4) {
                         Text(layout.entry.displayName)
@@ -208,8 +210,9 @@ private struct TreemapTile: View {
                             .fixedSize(horizontal: true, vertical: false)
                             .layoutPriority(1)
                     }
-                    .padding(.horizontal, 4)
-                    .frame(height: TreemapLabelMetrics.parentHeaderHeight, alignment: .leading)
+                    .padding(.horizontal, 6)
+                    .padding(.top, 2)
+                    .frame(height: TreemapLabelMetrics.parentHeaderHeight, alignment: .topLeading)
                 }
             }
         }
@@ -540,7 +543,7 @@ private enum TreemapLabelMetrics {
         return rect.width > minimumWidth && rect.height > headerHeight + 8
     }
 
-    static let parentHeaderHeight: CGFloat = 20
+    static let parentHeaderHeight: CGFloat = 23
 }
 
 private struct TreemapLayoutItem: Identifiable {
