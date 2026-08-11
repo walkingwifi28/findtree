@@ -3,24 +3,29 @@ import FindTreeCore
 
 private enum AppVisualStyle: String {
     case standard
-    case neumorphic
+    case neumorphism
 }
 
 struct ContentView: View {
     @StateObject private var model = AppModel()
     @Environment(\.colorScheme) private var colorScheme
-    @AppStorage("findtree.visualStyle") private var visualStyleRawValue = AppVisualStyle.neumorphic.rawValue
+    @AppStorage("findtree.visualStyle") private var visualStyleRawValue = AppVisualStyle.neumorphism.rawValue
 
     private let neumorphicHorizontalInset: CGFloat = 12
 
     private var visualStyle: AppVisualStyle {
-        get { AppVisualStyle(rawValue: visualStyleRawValue) ?? .neumorphic }
+        get { AppVisualStyle(rawValue: visualStyleRawValue) ?? .neumorphism }
         nonmutating set { visualStyleRawValue = newValue.rawValue }
     }
 
     var body: some View {
         mainContent
             .frame(minWidth: 980, minHeight: 680)
+            .onAppear {
+                if visualStyleRawValue == "neumorphic" {
+                    visualStyleRawValue = AppVisualStyle.neumorphism.rawValue
+                }
+            }
             .background {
                 WindowAppearanceConfigurator(
                     visualStyleRawValue: visualStyleRawValue,
@@ -65,7 +70,7 @@ struct ContentView: View {
                         .padding(.bottom, 12)
                 }
             }
-        case .neumorphic:
+        case .neumorphism:
             ZStack {
                 NeumorphicTheme.surface(for: colorScheme)
                     .ignoresSafeArea()
@@ -98,7 +103,7 @@ struct ContentView: View {
                 optionsMenu
             }
             .padding(12)
-        case .neumorphic:
+        case .neumorphism:
             HStack(spacing: 14) {
                 Button(action: model.chooseRootFolder) {
                     Label("Folder", systemImage: "folder")
@@ -164,7 +169,7 @@ struct ContentView: View {
             .menuIndicator(.hidden)
             .buttonStyle(.plain)
             .accessibilityLabel("Options")
-        case .neumorphic:
+        case .neumorphism:
             Menu {
                 appearancePicker
             } label: {
@@ -183,8 +188,8 @@ struct ContentView: View {
         Picker("Appearance", selection: $visualStyleRawValue) {
             Text("Standard")
                 .tag(AppVisualStyle.standard.rawValue)
-            Text("Neumorphic")
-                .tag(AppVisualStyle.neumorphic.rawValue)
+            Text("Neumorphism")
+                .tag(AppVisualStyle.neumorphism.rawValue)
         }
     }
 
@@ -201,7 +206,7 @@ struct ContentView: View {
                     SummaryCard(title: "Folders", value: result.directoryCount.formatted(), systemImage: "folder", visualStyle: visualStyle)
                 }
                 .padding(12)
-            case .neumorphic:
+            case .neumorphism:
                 HStack(spacing: 14) {
                     SummaryCard(title: "Capacity", value: model.totalCapacityBytes.map(formatBytes) ?? "—", systemImage: "externaldrive", visualStyle: visualStyle)
                     SummaryCard(title: "Volume Used", value: model.volumeUsedBytes.map(formatBytes) ?? "—", systemImage: "chart.pie", visualStyle: visualStyle)
@@ -222,7 +227,7 @@ struct ContentView: View {
                     Spacer()
                 }
                 .padding(14)
-            case .neumorphic:
+            case .neumorphism:
                 HStack(spacing: 10) {
                     Image(systemName: "externaldrive.badge.questionmark")
                         .font(.system(size: 18))
@@ -247,7 +252,7 @@ struct ContentView: View {
                     root: treemapRoot,
                     onMoveToTrash: model.moveToTrash,
                     legendLeadingPadding: 2,
-                    legendTrailingPadding: visualStyle == .neumorphic ? 0 : 2
+                    legendTrailingPadding: visualStyle == .neumorphism ? 0 : 2
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -283,7 +288,7 @@ private struct SummaryCard: View {
             cardContent
                 .padding(10)
                 .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
-        case .neumorphic:
+        case .neumorphism:
             cardContent
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
