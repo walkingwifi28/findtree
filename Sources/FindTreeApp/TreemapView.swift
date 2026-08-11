@@ -17,31 +17,57 @@ struct TreemapView: View {
 
 
     var body: some View {
-        GeometryReader { proxy in
-            let bounds = CGRect(origin: .zero, size: proxy.size)
-            let layouts = TreemapLayout.layout(root: root, in: bounds)
+        VStack(alignment: .leading, spacing: 6) {
+            TreemapColorLegend()
 
-            ZStack(alignment: .topLeading) {
-                // Keep the coordinate space at the full GeometryReader size without
-                // painting a background. This lets the app's real light/dark background
-                // show through every non-terminal directory.
-                Color.clear
-                    .frame(width: bounds.width, height: bounds.height)
-                    .allowsHitTesting(false)
+            GeometryReader { proxy in
+                let bounds = CGRect(origin: .zero, size: proxy.size)
+                let layouts = TreemapLayout.layout(root: root, in: bounds)
 
-                ForEach(layouts) { layout in
-                    TreemapTile(
-                        layout: layout,
-                        onMoveToTrash: onMoveToTrash
-                    )
+                ZStack(alignment: .topLeading) {
+                    // Keep the coordinate space at the full GeometryReader size without
+                    // painting a background. This lets the app's real light/dark background
+                    // show through every non-terminal directory.
+                    Color.clear
+                        .frame(width: bounds.width, height: bounds.height)
+                        .allowsHitTesting(false)
+
+                    ForEach(layouts) { layout in
+                        TreemapTile(
+                            layout: layout,
+                            onMoveToTrash: onMoveToTrash
+                        )
+                    }
+                }
+                .frame(width: bounds.width, height: bounds.height, alignment: .topLeading)
+                .clipped()
+                .onDisappear {
+                    FastTreemapTooltipController.shared.hide()
                 }
             }
-            .frame(width: bounds.width, height: bounds.height, alignment: .topLeading)
-            .clipped()
-            .onDisappear {
-                FastTreemapTooltipController.shared.hide()
+        }
+    }
+}
+
+private struct TreemapColorLegend: View {
+    var body: some View {
+        HStack(spacing: 14) {
+            ForEach(TreemapFileCategory.allCases, id: \.self) { category in
+                HStack(spacing: 5) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(TreemapColor.legendColor(for: category))
+                        .frame(width: 10, height: 10)
+
+                    Text(category.legendTitle)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
         }
+        .padding(.top, 8)
+        .padding(.horizontal, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -357,7 +383,7 @@ private struct FastTreemapTooltipView: View {
     }
 }
 
-private enum TreemapFileCategory {
+private enum TreemapFileCategory: CaseIterable {
     case video
     case image
     case audio
@@ -367,6 +393,20 @@ private enum TreemapFileCategory {
     case code
     case system
     case other
+
+    var legendTitle: String {
+        switch self {
+        case .video: return "Video"
+        case .image: return "Image"
+        case .audio: return "Audio"
+        case .archive: return "Archive"
+        case .application: return "Application"
+        case .document: return "Document"
+        case .code: return "Code"
+        case .system: return "System"
+        case .other: return "Other"
+        }
+    }
 
     static func classify(fileName: String) -> TreemapFileCategory {
         let lowercasedName = fileName.lowercased()
@@ -411,6 +451,11 @@ private enum TreemapFileCategory {
 }
 
 private enum TreemapColor {
+    static func legendColor(for category: TreemapFileCategory) -> Color {
+        let base = baseComponents(for: category)
+        return Color(hue: base.hue, saturation: base.saturation, brightness: base.brightness)
+    }
+
     static func terminalColor(for entry: TreemapEntry) -> Color {
         switch entry {
         case .file(let file):
@@ -465,33 +510,37 @@ private enum TreemapColor {
     }
 
     private static func color(for category: TreemapFileCategory, variationKey: String) -> Color {
-        let base: (hue: Double, saturation: Double, brightness: Double)
-        switch category {
-        case .video:
-            base = (0.585, 0.48, 0.72) // blue
-        case .image:
-            base = (0.765, 0.42, 0.72) // purple
-        case .audio:
-            base = (0.915, 0.40, 0.73) // pink
-        case .archive:
-            base = (0.080, 0.48, 0.76) // orange
-        case .application:
-            base = (0.005, 0.44, 0.70) // red
-        case .document:
-            base = (0.350, 0.38, 0.68) // green
-        case .code:
-            base = (0.505, 0.40, 0.68) // cyan
-        case .system:
-            base = (0.600, 0.06, 0.60) // neutral gray
-        case .other:
-            base = (0.145, 0.30, 0.72) // yellow / beige
-        }
-
+        let base = baseComponents(for: category)
         let variation = stableVariation(for: variationKey)
         let hue = wrappedHue(base.hue + variation.hue)
         let saturation = min(max(base.saturation + variation.saturation, 0.02), 0.58)
         let brightness = min(max(base.brightness + variation.brightness, 0.54), 0.82)
         return Color(hue: hue, saturation: saturation, brightness: brightness)
+    }
+
+    private static func baseComponents(
+        for category: TreemapFileCategory
+    ) -> (hue: Double, saturation: Double, brightness: Double) {
+        switch category {
+        case .video:
+            return (0.585, 0.48, 0.72) // blue
+        case .image:
+            return (0.765, 0.42, 0.72) // purple
+        case .audio:
+            return (0.915, 0.40, 0.73) // pink
+        case .archive:
+            return (0.080, 0.48, 0.76) // orange
+        case .application:
+            return (0.005, 0.44, 0.70) // red
+        case .document:
+            return (0.350, 0.38, 0.68) // green
+        case .code:
+            return (0.505, 0.40, 0.68) // cyan
+        case .system:
+            return (0.600, 0.06, 0.60) // neutral gray
+        case .other:
+            return (0.145, 0.30, 0.72) // yellow / beige
+        }
     }
 
     private static func stableVariation(
