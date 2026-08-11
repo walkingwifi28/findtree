@@ -4,6 +4,38 @@ FindTree is a fast macOS disk-usage analyzer inspired by WizTree. It provides bo
 
 All index data stays on the Mac. There is no network upload path in the project.
 
+
+## Install
+
+### Homebrew Cask
+
+FindTree can use this repository itself as a Homebrew tap.
+
+```bash
+brew tap walkingwifi28/findtree https://github.com/walkingwifi28/findtree.git
+brew trust --cask walkingwifi28/findtree/findtree
+brew install --cask findtree
+```
+
+Launch the app:
+
+```bash
+open /Applications/FindTree.app
+```
+
+The automated release is currently ad hoc signed and is not Apple notarized. If macOS blocks the app on first launch, open it from Finder with **Control-click → Open**. If it is still blocked, remove the quarantine attribute:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/FindTree.app
+open /Applications/FindTree.app
+```
+
+For whole-disk analysis, enable FindTree in **System Settings → Privacy & Security → Full Disk Access**.
+
+### DMG
+
+Each `v*` tag creates a GitHub Release containing an Apple Silicon DMG and its SHA-256 file. Open the DMG and drag `FindTree.app` to `Applications`.
+
 ## Implemented
 
 ### Fast scanner
@@ -113,6 +145,60 @@ If the shell itself is running through Rosetta on Apple Silicon:
 
 ```bash
 arch -arm64 swift build -c release
+```
+
+## Release
+
+Pushing a `v*` tag runs `.github/workflows/macos-release.yml` automatically.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow:
+
+1. runs the Swift test suite on an arm64 macOS 15 runner
+2. builds the release `FindTree.app` with the tag version embedded in `Info.plist`
+3. ad hoc signs the app
+4. creates `FindTree-<version>-arm64.dmg`
+5. creates and verifies the SHA-256 file
+6. publishes both files to the GitHub Release
+7. generates `Casks/findtree.rb` with the release URL and SHA-256
+8. commits and pushes the updated Cask to the repository's default branch
+
+This repository is used directly as the Homebrew tap, so a separate `homebrew-tap` repository or Personal Access Token is not required. The workflow uses `GITHUB_TOKEN` with `contents: write`.
+
+If the default branch is protected against direct pushes, allow GitHub Actions to push the Cask update or change the Cask update step to a pull-request flow.
+
+### Build a release DMG locally
+
+```bash
+./scripts/build-release.sh 0.1.0
+```
+
+Output:
+
+```text
+dist/FindTree-0.1.0-arm64.dmg
+dist/FindTree-0.1.0-arm64.dmg.sha256
+```
+
+### Generate a Cask locally
+
+```bash
+VERSION=0.1.0
+DMG="dist/FindTree-${VERSION}-arm64.dmg"
+SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
+
+./scripts/generate-cask.sh \
+  "$VERSION" \
+  "$SHA256" \
+  "file://$(pwd)/$DMG" \
+  dist/findtree.rb \
+  "https://github.com/walkingwifi28/findtree"
+
+ruby -c dist/findtree.rb
 ```
 
 ## Test
