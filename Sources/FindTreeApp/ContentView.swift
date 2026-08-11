@@ -74,14 +74,11 @@ struct ContentView: View {
     private var summary: some View {
         if let result = model.snapshot?.result {
             HStack(spacing: 12) {
-                SummaryCard(
-                    title: "Capacity",
-                    value: model.totalCapacityBytes.map(formatBytes) ?? "—",
-                    detail: "Total volume capacity"
-                )
-                SummaryCard(title: "Allocated", value: formatBytes(result.allocatedBytes), detail: "Physical allocation")
-                SummaryCard(title: "Files", value: result.fileCount.formatted(), detail: "Indexed files")
-                SummaryCard(title: "Folders", value: result.directoryCount.formatted(), detail: "Indexed directories")
+                SummaryCard(title: "Capacity", value: model.totalCapacityBytes.map(formatBytes) ?? "—", systemImage: "externaldrive")
+                SummaryCard(title: "Volume Used", value: model.volumeUsedBytes.map(formatBytes) ?? "—", systemImage: "chart.pie")
+                SummaryCard(title: "Free", value: model.volumeFreeBytes.map(formatBytes) ?? "—", systemImage: "circle.dashed")
+                SummaryCard(title: "Files", value: result.fileCount.formatted(), systemImage: "doc")
+                SummaryCard(title: "Folders", value: result.directoryCount.formatted(), systemImage: "folder")
 
             }
             .padding(12)
@@ -128,19 +125,23 @@ struct ContentView: View {
 private struct SummaryCard: View {
     let title: String
     let value: String
-    let detail: String
+    let systemImage: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.caption)
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 18))
                 .foregroundStyle(.secondary)
-            Text(value)
-                .font(.title3.weight(.semibold))
-                .monospacedDigit()
-            Text(detail)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.title3.weight(.semibold))
+                    .monospacedDigit()
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)

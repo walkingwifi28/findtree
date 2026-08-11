@@ -49,7 +49,7 @@ The SwiftUI app includes:
 - folder picker
 - Scan / Rescan
 - cached result shown at launch
-- allocated/logical size summary
+- volume capacity / used-space summary
 - folder drill-down table
 - folder filtering and sorting
 - interactive treemap

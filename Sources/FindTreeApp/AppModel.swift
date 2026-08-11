@@ -154,12 +154,125 @@ private func parentPath(of path: String) -> String {
     return String(path[..<slash])
 }
 
+private struct VolumeStorageInfo: Sendable {
+    let usedBytes: UInt64?
+    let freeBytes: UInt64?
+}
+
+private enum VolumeStorageReader {
+    static func storageInfo(for path: String) -> VolumeStorageInfo {
+        let pathURL = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        let volumePath = (try? pathURL.resourceValues(forKeys: [.volumeURLKey]).volume?.path) ?? path
+
+        guard let info = diskutilPlist(arguments: ["info", "-plist", volumePath]) else {
+            return VolumeStorageInfo(usedBytes: nil, freeBytes: nil)
+        }
+
+        let freeBytes = unsignedInteger(info["APFSContainerFree"])
+            ?? unsignedInteger(info["FreeSpace"])
+
+        let usedBytes: UInt64?
+        if let groupID = info["APFSVolumeGroupID"] as? String,
+           let groupedUsage = apfsVolumeGroupUsage(groupID: groupID) {
+            usedBytes = groupedUsage
+        } else if let capacityInUse = unsignedInteger(info["CapacityInUse"]) {
+            usedBytes = capacityInUse
+        } else {
+            let total = unsignedInteger(info["TotalSize"])
+            let free = unsignedInteger(info["FreeSpace"])
+            if let total, let free, total >= free {
+                usedBytes = total - free
+            } else {
+                usedBytes = nil
+            }
+        }
+
+        return VolumeStorageInfo(usedBytes: usedBytes, freeBytes: freeBytes)
+    }
+
+    private static func apfsVolumeGroupUsage(groupID: String) -> UInt64? {
+        guard let groups = diskutilPlist(arguments: ["apfs", "listVolumeGroups", "-plist"]),
+              let containers = groups["Containers"] as? [[String: Any]]
+        else { return nil }
+
+        var memberDeviceIDs = Set<String>()
+        for container in containers {
+            guard let volumeGroups = container["VolumeGroups"] as? [[String: Any]] else { continue }
+            for group in volumeGroups {
+                guard (group["APFSVolumeGroupUUID"] as? String)?.caseInsensitiveCompare(groupID) == .orderedSame,
+                      let volumes = group["Volumes"] as? [[String: Any]]
+                else { continue }
+                for volume in volumes {
+                    if let deviceID = volume["DeviceIdentifier"] as? String {
+                        memberDeviceIDs.insert(deviceID)
+                    }
+                }
+            }
+        }
+
+        guard !memberDeviceIDs.isEmpty,
+              let apfs = diskutilPlist(arguments: ["apfs", "list", "-plist"]),
+              let containers = apfs["Containers"] as? [[String: Any]]
+        else { return nil }
+
+        var total: UInt64 = 0
+        var found = false
+        for container in containers {
+            guard let volumes = container["Volumes"] as? [[String: Any]] else { continue }
+            for volume in volumes {
+                guard let deviceID = volume["DeviceIdentifier"] as? String,
+                      memberDeviceIDs.contains(deviceID),
+                      let used = unsignedInteger(volume["CapacityInUse"])
+                else { continue }
+                total &+= used
+                found = true
+            }
+        }
+        return found ? total : nil
+    }
+
+    private static func diskutilPlist(arguments: [String]) -> [String: Any]? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        process.arguments = arguments
+
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            return try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        } catch {
+            return nil
+        }
+    }
+
+    private static func unsignedInteger(_ value: Any?) -> UInt64? {
+        if let number = value as? NSNumber {
+            return number.uint64Value
+        }
+        if let value = value as? UInt64 {
+            return value
+        }
+        if let value = value as? Int, value >= 0 {
+            return UInt64(value)
+        }
+        return nil
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var rootPath: String
     @Published var currentDirectory: String
     @Published var snapshot: IndexedScanSnapshot?
     @Published var totalCapacityBytes: UInt64?
+    @Published var volumeUsedBytes: UInt64?
+    @Published var volumeFreeBytes: UInt64?
     @Published var isScanning = false
     @Published var scanProgressPercent: Int?
     @Published var statusMessage = ""
@@ -172,6 +285,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private let fileStore: FileIndexStore
     private var cachedSnapshotTask: Task<Void, Never>?
     private var treemapFileTask: Task<Void, Never>?
+    private var volumeUsageTask: Task<Void, Never>?
     private var childrenByParent: [String: [DirectoryUsage]] = [:]
     private var usageByPath: [String: DirectoryUsage] = [:]
 
@@ -182,19 +296,22 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         self.rootPath = initialRoot
         self.currentDirectory = initialRoot
         self.totalCapacityBytes = nil
+        self.volumeUsedBytes = nil
+        self.volumeFreeBytes = nil
         self.shouldShowFullDiskAccessNotice = !Self.hasFullDiskAccess()
 
         let indexURL = Self.defaultIndexURL()
         self.indexStore = ScanIndexStore(databaseURL: indexURL)
         self.fileStore = FileIndexStore(databaseURL: indexURL)
 
-        refreshVolumeCapacity()
+        refreshVolumeStorageInfo()
         loadCachedSnapshot()
     }
 
     deinit {
         cachedSnapshotTask?.cancel()
         treemapFileTask?.cancel()
+        volumeUsageTask?.cancel()
     }
 
     var rootUsage: DirectoryUsage? {
@@ -371,7 +488,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         rootPath = standardized
         currentDirectory = standardized
         UserDefaults.standard.set(standardized, forKey: Self.lastRootPathDefaultsKey)
-        refreshVolumeCapacity()
+        refreshVolumeStorageInfo()
         snapshot = nil
         childrenByParent = [:]
         usageByPath = [:]
@@ -638,7 +755,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func refreshVolumeCapacity() {
+    private func refreshVolumeStorageInfo() {
         do {
             let attributes = try FileManager.default.attributesOfFileSystem(forPath: rootPath)
             if let size = attributes[.systemSize] as? NSNumber {
@@ -648,6 +765,19 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             }
         } catch {
             totalCapacityBytes = nil
+        }
+
+        volumeUsageTask?.cancel()
+        volumeUsedBytes = nil
+        volumeFreeBytes = nil
+        let root = rootPath
+        volumeUsageTask = Task { [weak self] in
+            let storageInfo = await Task.detached(priority: .utility) {
+                VolumeStorageReader.storageInfo(for: root)
+            }.value
+            guard !Task.isCancelled, let self, self.rootPath == root else { return }
+            self.volumeUsedBytes = storageInfo.usedBytes
+            self.volumeFreeBytes = storageInfo.freeBytes
         }
     }
 
