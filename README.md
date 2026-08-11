@@ -155,3 +155,7 @@ The app surfaces the unreadable-directory count and provides a shortcut to the F
 FindTree intentionally does not parse raw APFS container structures. The current design uses supported macOS APIs for scanning and local SQLite indexes. That keeps FileVault, APFS volume groups, snapshots, and OS updates out of the scanner's raw-filesystem compatibility surface.
 
 A future low-level `getattrlistbulk()` implementation can still be benchmarked against Foundation if further first-scan optimization is needed.
+
+## License
+
+FindTree is released under the MIT License. See [LICENSE](LICENSE) for details.
