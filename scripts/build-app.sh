@@ -57,4 +57,4 @@ if command -v codesign >/dev/null 2>&1; then
     codesign --force --deep --sign - "$APP_DIR" >/dev/null
 fi
 
-print "Built: $APP_DIR"
+printf 'Built: %s\n' "$APP_DIR"

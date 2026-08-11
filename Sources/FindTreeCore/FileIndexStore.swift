@@ -163,6 +163,83 @@ public final class FileIndexStore: @unchecked Sendable {
         return files
     }
 
+    public func filesForParents(
+        rootPath: String,
+        parentPaths: [String],
+        limitPerParent: Int = 64
+    ) throws -> [String: [FileUsage]] {
+        guard limitPerParent > 0, !parentPaths.isEmpty else { return [:] }
+
+        let root = PathUtilities.standardized(rootPath)
+        let parents = Array(Set(parentPaths.map(PathUtilities.standardized)))
+            .filter { PathUtilities.isDescendantOrEqual($0, of: root) }
+        guard !parents.isEmpty else { return [:] }
+
+        let url = databaseURL(rootPath: root)
+        let accessGate = FileIndexAccessCoordinator.shared.gate(for: url)
+        accessGate.wait()
+        defer { accessGate.signal() }
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+
+        let db = try openReadOnly(url)
+        defer { sqlite3_close(db) }
+        guard try loadStoredRoot(db) == root else { return [:] }
+
+        let sql = """
+        SELECT name, logical_bytes, allocated_bytes
+        FROM files
+        WHERE parent_relative = ? AND allocated_bytes > 0
+        ORDER BY allocated_bytes DESC, logical_bytes DESC, name COLLATE NOCASE
+        LIMIT ?
+        """
+        var statement: OpaquePointer?
+        try check(sqlite3_prepare_v2(db, sql, -1, &statement, nil), db: db)
+        defer { sqlite3_finalize(statement) }
+
+        var result: [String: [FileUsage]] = [:]
+        result.reserveCapacity(parents.count)
+
+        for parent in parents {
+            let parentRelative: String
+            if parent == root {
+                parentRelative = ""
+            } else {
+                parentRelative = String(parent.dropFirst(root.count + 1))
+            }
+
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            try bindText(parentRelative, at: 1, statement: statement, db: db)
+            sqlite3_bind_int(statement, 2, Int32(clamping: limitPerParent))
+
+            var files: [FileUsage] = []
+            files.reserveCapacity(limitPerParent)
+            while true {
+                let step = sqlite3_step(statement)
+                if step == SQLITE_DONE { break }
+                guard step == SQLITE_ROW else {
+                    try check(step, db: db)
+                    break
+                }
+
+                let name = text(statement, column: 0)
+                files.append(
+                    FileUsage(
+                        path: (parent as NSString).appendingPathComponent(name),
+                        parentPath: parent,
+                        name: name,
+                        logicalBytes: UInt64(max(sqlite3_column_int64(statement, 1), 0)),
+                        allocatedBytes: UInt64(max(sqlite3_column_int64(statement, 2), 0))
+                    )
+                )
+            }
+
+            if !files.isEmpty { result[parent] = files }
+        }
+
+        return result
+    }
+
     public func applyFileChanges(rootPath: String, filePaths: [String]) throws -> [FileIndexDelta] {
         guard !filePaths.isEmpty else { return [] }
         let root = PathUtilities.standardized(rootPath)

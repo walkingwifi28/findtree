@@ -20,6 +20,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var isWatching = false
     @Published var statusMessage = ""
     @Published var lastError: String?
+    @Published private var treemapFilesByParent: [String: [FileUsage]] = [:]
 
     private let scanner = FastScanner()
     private let indexStore: ScanIndexStore
@@ -27,6 +28,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private let syncQueue = DispatchQueue(label: "findtree.app.incremental-sync", qos: .utility)
     private var watcher: FSEventWatcher?
     private var liveRefreshTask: Task<Void, Never>?
+    private var treemapFileTask: Task<Void, Never>?
     private var childrenByParent: [String: [DirectoryUsage]] = [:]
     private var usageByPath: [String: DirectoryUsage] = [:]
 
@@ -47,6 +49,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     deinit {
         watcher?.stop()
         liveRefreshTask?.cancel()
+        treemapFileTask?.cancel()
     }
 
     var rootUsage: DirectoryUsage? {
@@ -57,18 +60,146 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         usageByPath[currentDirectory]
     }
 
-    var treemapRows: [DirectoryUsage] {
-        Array(
-            (childrenByParent[currentDirectory] ?? [])
-                .filter { $0.allocatedBytes > 0 }
-                .sorted {
-                    if $0.allocatedBytes == $1.allocatedBytes {
-                        return $0.path < $1.path
-                    }
-                    return $0.allocatedBytes > $1.allocatedBytes
-                }
-                .prefix(48)
+    var treemapRoot: TreemapNode? {
+        guard let usage = usageByPath[currentDirectory], usage.allocatedBytes > 0 else { return nil }
+        let minimumVisibleBytes = max(usage.allocatedBytes / 100_000, 256 * 1_024)
+        return buildTreemapNode(
+            usage: usage,
+            depth: 0,
+            maxDepth: 6,
+            minimumVisibleBytes: minimumVisibleBytes
         )
+    }
+
+    private func buildTreemapNode(
+        usage: DirectoryUsage,
+        depth: Int,
+        maxDepth: Int,
+        minimumVisibleBytes: UInt64
+    ) -> TreemapNode {
+        let allChildren = childrenByParent[usage.path] ?? []
+        let childAllocatedBytes = allChildren.reduce(UInt64(0)) { partial, child in
+            partial &+ child.allocatedBytes
+        }
+        let directAllocatedBytes = usage.allocatedBytes > childAllocatedBytes
+            ? usage.allocatedBytes - childAllocatedBytes
+            : 0
+
+        guard depth < maxDepth else {
+            return TreemapNode(
+                usage: usage,
+                children: [],
+                files: treemapFilesByParent[usage.path] ?? [],
+                directAllocatedBytes: directAllocatedBytes
+            )
+        }
+
+        // Show many more siblings than before so package/cache directories with
+        // hundreds of children are represented as individual rectangles instead of
+        // one large blank/aggregate area. Recursion is still bounded by maxDepth.
+        let childLimit: Int
+        switch depth {
+        case 0:
+            childLimit = 64
+        case 1...3:
+            childLimit = 192
+        default:
+            childLimit = 96
+        }
+
+        let children = allChildren
+            .filter { child in
+                child.allocatedBytes > 0
+                    && (depth < 2 || child.allocatedBytes >= minimumVisibleBytes)
+            }
+            .sorted { lhs, rhs in
+                if lhs.allocatedBytes == rhs.allocatedBytes {
+                    return lhs.path < rhs.path
+                }
+                return lhs.allocatedBytes > rhs.allocatedBytes
+            }
+            .prefix(childLimit)
+            .map { child in
+                buildTreemapNode(
+                    usage: child,
+                    depth: depth + 1,
+                    maxDepth: maxDepth,
+                    minimumVisibleBytes: minimumVisibleBytes
+                )
+            }
+
+        return TreemapNode(
+            usage: usage,
+            children: Array(children),
+            files: treemapFilesByParent[usage.path] ?? [],
+            directAllocatedBytes: directAllocatedBytes
+        )
+    }
+
+    private func refreshTreemapFiles() {
+        treemapFileTask?.cancel()
+        treemapFileTask = nil
+        treemapFilesByParent = [:]
+
+        guard snapshot != nil,
+              fileStore.hasIndex(rootPath: rootPath),
+              let usage = usageByPath[currentDirectory],
+              usage.allocatedBytes > 0
+        else { return }
+
+        let minimumVisibleBytes = max(usage.allocatedBytes / 100_000, 256 * 1_024)
+        let directoryRoot = buildTreemapNode(
+            usage: usage,
+            depth: 0,
+            maxDepth: 6,
+            minimumVisibleBytes: minimumVisibleBytes
+        )
+
+        var candidates: [(path: String, bytes: UInt64)] = []
+        collectTreemapFileParents(from: directoryRoot, into: &candidates)
+        let parentPaths = candidates
+            .sorted { $0.bytes > $1.bytes }
+            .prefix(256)
+            .map(\.path)
+        guard !parentPaths.isEmpty else { return }
+
+        let root = rootPath
+        let current = currentDirectory
+        let fileStore = self.fileStore
+        treemapFileTask = Task { [weak self] in
+            do {
+                let grouped = try await Task.detached(priority: .utility) {
+                    try fileStore.filesForParents(
+                        rootPath: root,
+                        parentPaths: parentPaths,
+                        limitPerParent: 64
+                    )
+                }.value
+                guard !Task.isCancelled, let self,
+                      self.rootPath == root, self.currentDirectory == current
+                else { return }
+                self.treemapFilesByParent = grouped
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, let self,
+                      self.rootPath == root, self.currentDirectory == current
+                else { return }
+                self.lastError = String(describing: error)
+            }
+        }
+    }
+
+    private func collectTreemapFileParents(
+        from node: TreemapNode,
+        into result: inout [(path: String, bytes: UInt64)]
+    ) {
+        if node.directAllocatedBytes > 0 {
+            result.append((node.usage.path, node.directAllocatedBytes))
+        }
+        for child in node.children {
+            collectTreemapFileParents(from: child, into: &result)
+        }
     }
 
     var canNavigateUp: Bool {
@@ -99,6 +230,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         usageByPath = [:]
         lastError = nil
         scanProgressPercent = nil
+        treemapFileTask?.cancel()
+        treemapFileTask = nil
+        treemapFilesByParent = [:]
         statusMessage = ""
         loadCachedSnapshot(startWatcher: false)
     }
@@ -191,20 +325,27 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func navigate(to directory: DirectoryUsage) {
         currentDirectory = directory.path
+        refreshTreemapFiles()
     }
 
     func navigateUp() {
         guard canNavigateUp else { return }
         let parent = (currentDirectory as NSString).deletingLastPathComponent
         currentDirectory = PathUtilitiesForApp.clamp(parent, toRoot: rootPath)
+        refreshTreemapFiles()
     }
 
     func goToRoot() {
         currentDirectory = rootPath
+        refreshTreemapFiles()
     }
 
     func revealCurrentDirectory() {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: currentDirectory)])
+    }
+
+    func revealFile(_ file: FileUsage) {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
     }
 
     func openFullDiskAccessSettings() {
@@ -254,6 +395,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         if currentDirectory != rootPath && usageByPath[currentDirectory] == nil {
             currentDirectory = rootPath
         }
+        refreshTreemapFiles()
     }
 
     private func startWatching(catchUpFromStoredCursor: Bool = false) {

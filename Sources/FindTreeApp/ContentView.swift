@@ -145,16 +145,21 @@ struct ContentView: View {
             }
             .padding(.top, 10)
 
-            if model.treemapRows.isEmpty {
+            if let treemapRoot = model.treemapRoot,
+               !treemapRoot.children.isEmpty || treemapRoot.directAllocatedBytes > 0 {
+                TreemapView(
+                    root: treemapRoot,
+                    onSelectDirectory: model.navigate,
+                    onSelectFile: model.revealFile
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
                 ContentUnavailableView(
                     "No child folders",
                     systemImage: "folder",
                     description: Text("This folder has no indexed child directories.")
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                TreemapView(items: model.treemapRows, onSelect: model.navigate)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

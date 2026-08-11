@@ -34,6 +34,34 @@ import Testing
     #expect(largest.first?.name == "movie.mov")
 }
 
+
+@Test func loadsDirectFilesForTreemapParents() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("findtree-treemap-files-\(UUID().uuidString)", isDirectory: true)
+    let dbURL = tempRoot.appendingPathComponent("index.sqlite")
+    defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+    let root = "/example/treemap-root"
+    let nested = root + "/nested"
+    let store = FileIndexStore(databaseURL: dbURL)
+    let writer = try store.makeFullWriter(rootPath: root)
+    try writer.consume([
+        FileUsage(path: root + "/root-small.dat", parentPath: root, name: "root-small.dat", logicalBytes: 1, allocatedBytes: 4_096),
+        FileUsage(path: root + "/root-large.dat", parentPath: root, name: "root-large.dat", logicalBytes: 2, allocatedBytes: 16_384),
+        FileUsage(path: nested + "/nested.dat", parentPath: nested, name: "nested.dat", logicalBytes: 3, allocatedBytes: 8_192)
+    ])
+    try writer.finish()
+
+    let grouped = try store.filesForParents(
+        rootPath: root,
+        parentPaths: [root, nested],
+        limitPerParent: 8
+    )
+
+    #expect(grouped[root]?.map(\.name) == ["root-large.dat", "root-small.dat"])
+    #expect(grouped[nested]?.map(\.name) == ["nested.dat"])
+}
+
 @Test func incrementalUpdaterKeepsFileIndexInSync() throws {
     let tempRoot = FileManager.default.temporaryDirectory
         .appendingPathComponent("findtree-file-sync-\(UUID().uuidString)", isDirectory: true)
