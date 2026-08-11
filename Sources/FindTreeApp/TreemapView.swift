@@ -14,11 +14,15 @@ struct TreemapNode: Identifiable {
 struct TreemapView: View {
     let root: TreemapNode
     let onMoveToTrash: (URL) -> Void
-
+    var legendLeadingPadding: CGFloat = 2
+    var legendTrailingPadding: CGFloat = 2
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            TreemapColorLegend()
+            TreemapColorLegend(
+                leadingPadding: legendLeadingPadding,
+                trailingPadding: legendTrailingPadding
+            )
 
             GeometryReader { proxy in
                 let bounds = CGRect(origin: .zero, size: proxy.size)
@@ -50,6 +54,9 @@ struct TreemapView: View {
 }
 
 private struct TreemapColorLegend: View {
+    let leadingPadding: CGFloat
+    let trailingPadding: CGFloat
+
     var body: some View {
         HStack(spacing: 14) {
             ForEach(TreemapFileCategory.allCases, id: \.self) { category in
@@ -66,7 +73,8 @@ private struct TreemapColorLegend: View {
             }
         }
         .padding(.top, 8)
-        .padding(.horizontal, 2)
+        .padding(.leading, leadingPadding)
+        .padding(.trailing, trailingPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
