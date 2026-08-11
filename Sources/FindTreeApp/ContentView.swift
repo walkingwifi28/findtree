@@ -70,8 +70,12 @@ struct ContentView: View {
     private var summary: some View {
         if let result = model.snapshot?.result {
             HStack(spacing: 12) {
+                SummaryCard(
+                    title: "Capacity",
+                    value: model.totalCapacityBytes.map(formatBytes) ?? "—",
+                    detail: "Total volume capacity"
+                )
                 SummaryCard(title: "Allocated", value: formatBytes(result.allocatedBytes), detail: "Physical allocation")
-                SummaryCard(title: "Logical", value: formatBytes(result.logicalBytes), detail: "Apparent file size")
                 SummaryCard(title: "Files", value: result.fileCount.formatted(), detail: "Indexed files")
                 SummaryCard(title: "Folders", value: result.directoryCount.formatted(), detail: "Indexed directories")
 
@@ -125,6 +129,12 @@ struct ContentView: View {
 
                 Spacer()
 
+                if let usage = model.currentUsage {
+                    Text("\(formatBytes(usage.allocatedBytes)) · \(usage.fileCount.formatted()) files")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Text(model.statusMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -138,70 +148,13 @@ struct ContentView: View {
                     systemImage: "folder",
                     description: Text("This folder has no indexed child directories.")
                 )
-                .frame(height: 210)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 TreemapView(items: model.treemapRows, onSelect: model.navigate)
-                    .frame(height: 230)
-            }
-
-            HStack {
-                TextField("Filter folders", text: $model.directoryFilter)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 320)
-
-                Picker("Sort", selection: $model.directorySort) {
-                    ForEach(AppModel.DirectorySortMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 430)
-
-                Spacer()
-
-                if let usage = model.currentUsage {
-                    Text("\(formatBytes(usage.allocatedBytes)) · \(usage.fileCount.formatted()) files")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            directoryHeader
-            Divider()
-
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(model.directoryRows) { directory in
-                        DirectoryRow(
-                            directory: directory,
-                            parentAllocated: model.currentUsage?.allocatedBytes ?? 0,
-                            onOpen: { model.navigate(to: directory) }
-                        )
-                        Divider()
-                    }
-                }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-    }
-
-    private var directoryHeader: some View {
-        HStack(spacing: 8) {
-            Text("Folder")
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text("Allocated")
-                .frame(width: 105, alignment: .trailing)
-            Text("Logical")
-                .frame(width: 105, alignment: .trailing)
-            Text("Files")
-                .frame(width: 85, alignment: .trailing)
-            Text("Folders")
-                .frame(width: 85, alignment: .trailing)
-            Text("Share")
-                .frame(width: 70, alignment: .trailing)
-        }
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var errorBinding: Binding<Bool> {
@@ -210,8 +163,6 @@ struct ContentView: View {
             set: { if !$0 { model.lastError = nil } }
         )
     }
-
-
 }
 
 private struct SummaryCard: View {
@@ -236,55 +187,3 @@ private struct SummaryCard: View {
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
     }
 }
-
-private struct DirectoryRow: View {
-    let directory: DirectoryUsage
-    let parentAllocated: UInt64
-    let onOpen: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 7) {
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text((directory.path as NSString).lastPathComponent)
-                        .lineLimit(1)
-                    Text(directory.path)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text(formatBytes(directory.allocatedBytes))
-                .frame(width: 105, alignment: .trailing)
-                .monospacedDigit()
-            Text(formatBytes(directory.logicalBytes))
-                .frame(width: 105, alignment: .trailing)
-                .monospacedDigit()
-            Text(directory.fileCount.formatted())
-                .frame(width: 85, alignment: .trailing)
-                .monospacedDigit()
-            Text(directory.directoryCount.formatted())
-                .frame(width: 85, alignment: .trailing)
-                .monospacedDigit()
-            Text(percentage(directory.allocatedBytes, of: parentAllocated))
-                .frame(width: 70, alignment: .trailing)
-                .monospacedDigit()
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2, perform: onOpen)
-        .contextMenu {
-            Button("Open Folder", action: onOpen)
-            Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: directory.path)])
-            }
-        }
-    }
-}
-

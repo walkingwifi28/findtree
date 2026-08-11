@@ -11,20 +11,10 @@ private final class WeakAppModelBox: @unchecked Sendable {
 
 @MainActor
 final class AppModel: ObservableObject, @unchecked Sendable {
-    enum DirectorySortMode: String, CaseIterable, Identifiable {
-        case allocated = "Allocated"
-        case logical = "Logical"
-        case name = "Name"
-        case files = "Files"
-
-        var id: String { rawValue }
-    }
-
     @Published var rootPath: String
     @Published var currentDirectory: String
     @Published var snapshot: IndexedScanSnapshot?
-    @Published var directoryFilter = ""
-    @Published var directorySort: DirectorySortMode = .allocated
+    @Published var totalCapacityBytes: UInt64?
     @Published var isScanning = false
     @Published var isWatching = false
     @Published var statusMessage = ""
@@ -43,11 +33,13 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
         self.rootPath = home
         self.currentDirectory = home
+        self.totalCapacityBytes = nil
 
         let indexURL = Self.defaultIndexURL()
         self.indexStore = ScanIndexStore(databaseURL: indexURL)
         self.fileStore = FileIndexStore(databaseURL: indexURL)
 
+        refreshVolumeCapacity()
         loadCachedSnapshot(startWatcher: false)
     }
 
@@ -64,29 +56,18 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         usageByPath[currentDirectory]
     }
 
-    var directoryRows: [DirectoryUsage] {
-        var rows = childrenByParent[currentDirectory] ?? []
-        let filter = directoryFilter.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !filter.isEmpty {
-            rows = rows.filter {
-                $0.path.lastPathComponent.localizedCaseInsensitiveContains(filter)
-            }
-        }
-        switch directorySort {
-        case .allocated:
-            rows.sort { $0.allocatedBytes == $1.allocatedBytes ? $0.path < $1.path : $0.allocatedBytes > $1.allocatedBytes }
-        case .logical:
-            rows.sort { $0.logicalBytes == $1.logicalBytes ? $0.path < $1.path : $0.logicalBytes > $1.logicalBytes }
-        case .name:
-            rows.sort { $0.path.lastPathComponent.localizedStandardCompare($1.path.lastPathComponent) == .orderedAscending }
-        case .files:
-            rows.sort { $0.fileCount == $1.fileCount ? $0.path < $1.path : $0.fileCount > $1.fileCount }
-        }
-        return rows
-    }
-
     var treemapRows: [DirectoryUsage] {
-        Array(directoryRows.filter { $0.allocatedBytes > 0 }.prefix(24))
+        Array(
+            (childrenByParent[currentDirectory] ?? [])
+                .filter { $0.allocatedBytes > 0 }
+                .sorted {
+                    if $0.allocatedBytes == $1.allocatedBytes {
+                        return $0.path < $1.path
+                    }
+                    return $0.allocatedBytes > $1.allocatedBytes
+                }
+                .prefix(48)
+        )
     }
 
     var canNavigateUp: Bool {
@@ -111,6 +92,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let standardized = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
         rootPath = standardized
         currentDirectory = standardized
+        refreshVolumeCapacity()
         snapshot = nil
         childrenByParent = [:]
         usageByPath = [:]
@@ -176,19 +158,16 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     func navigate(to directory: DirectoryUsage) {
         currentDirectory = directory.path
-        directoryFilter = ""
     }
 
     func navigateUp() {
         guard canNavigateUp else { return }
         let parent = (currentDirectory as NSString).deletingLastPathComponent
         currentDirectory = PathUtilitiesForApp.clamp(parent, toRoot: rootPath)
-        directoryFilter = ""
     }
 
     func goToRoot() {
         currentDirectory = rootPath
-        directoryFilter = ""
     }
 
     func revealCurrentDirectory() {
@@ -341,6 +320,19 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 self.lastError = String(describing: error)
                 self.statusMessage = "Live display refresh failed"
             }
+        }
+    }
+
+    private func refreshVolumeCapacity() {
+        do {
+            let attributes = try FileManager.default.attributesOfFileSystem(forPath: rootPath)
+            if let size = attributes[.systemSize] as? NSNumber {
+                totalCapacityBytes = size.uint64Value
+            } else {
+                totalCapacityBytes = nil
+            }
+        } catch {
+            totalCapacityBytes = nil
         }
     }
 
