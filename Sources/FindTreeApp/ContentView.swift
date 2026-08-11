@@ -83,23 +83,6 @@ struct ContentView: View {
                 SummaryCard(title: "Files", value: result.fileCount.formatted(), detail: "Indexed files")
                 SummaryCard(title: "Folders", value: result.directoryCount.formatted(), detail: "Indexed directories")
 
-                if result.inaccessibleDirectoryCount > 0 {
-                    Button(action: model.openFullDiskAccessSettings) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Access")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text("\(result.inaccessibleDirectoryCount) unreadable")
-                                .font(.headline)
-                            Text("Open Full Disk Access")
-                                .font(.caption2)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(10)
-                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-                }
             }
             .padding(12)
         } else {
