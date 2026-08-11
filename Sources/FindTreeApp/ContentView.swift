@@ -21,6 +21,13 @@ struct ContentView: View {
     var body: some View {
         mainContent
             .frame(minWidth: 980, minHeight: 680)
+            .background {
+                WindowAppearanceConfigurator(
+                    visualStyleRawValue: visualStyleRawValue,
+                    colorScheme: colorScheme
+                )
+                .frame(width: 0, height: 0)
+            }
             .alert("Full Disk Access is not enabled", isPresented: $model.shouldShowFullDiskAccessNotice) {
                 Button("Open Settings") {
                     model.dismissFullDiskAccessNotice()
@@ -43,15 +50,20 @@ struct ContentView: View {
     private var mainContent: some View {
         switch visualStyle {
         case .standard:
-            VStack(spacing: 0) {
-                toolbar
-                Divider()
-                summary
-                Divider()
+            ZStack {
+                NeumorphicTheme.surface(for: colorScheme)
+                    .ignoresSafeArea()
 
-                storageView
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 10)
+                VStack(spacing: 0) {
+                    toolbar
+                    Divider()
+                    summary
+                    Divider()
+
+                    storageView
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 10)
+                }
             }
         case .neumorphic:
             ZStack {
@@ -137,29 +149,21 @@ struct ContentView: View {
     private var optionsMenu: some View {
         switch visualStyle {
         case .standard:
-            ZStack {
-                Button(action: {}) {
-                    ZStack {
-                        Text("Rescan")
-                            .hidden()
-                        Image(systemName: "ellipsis.circle")
-                    }
+            Menu {
+                appearancePicker
+            } label: {
+                Image(systemName: "ellipsis.circle")
                     .frame(width: 16, height: 18)
-                }
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-
-                Menu {
-                    appearancePicker
-                } label: {
-                    Color.clear
-                        .frame(width: 34, height: 24)
-                        .contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .accessibilityLabel("Options")
+                    .frame(width: 36, height: 26)
+                    .background(
+                        .primary.opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
+            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
+            .accessibilityLabel("Options")
         case .neumorphic:
             Menu {
                 appearancePicker

@@ -6,6 +6,7 @@ struct FindTreeDesktopApp: App {
         WindowGroup("FindTree") {
             ContentView()
         }
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1180, height: 780)
         .commands {
             CommandGroup(replacing: .newItem) { }
