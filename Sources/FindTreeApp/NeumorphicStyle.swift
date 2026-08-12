@@ -30,7 +30,6 @@ enum NeumorphicTheme {
 }
 
 struct NeumorphicButtonStyle: ButtonStyle {
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.isEnabled) private var isEnabled
 
     var cornerRadius: CGFloat = 12
@@ -40,42 +39,20 @@ struct NeumorphicButtonStyle: ButtonStyle {
     var preserveOpacityWhenForcedPressed: Bool = false
 
     func makeBody(configuration: Configuration) -> some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        let surface = NeumorphicTheme.surface(for: colorScheme)
-        let highlight = NeumorphicTheme.highlight(for: colorScheme)
-        let shadow = NeumorphicTheme.shadow(for: colorScheme)
-        let isPressed = configuration.isPressed || forcePressed
-
         configuration.label
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
             .background {
-                if isPressed {
-                    shape.fill(
-                        surface
-                            .shadow(.inner(color: shadow.opacity(0.95), radius: 5, x: 4, y: 4))
-                            .shadow(.inner(color: highlight, radius: 5, x: -4, y: -4))
-                    )
-                } else {
-                    shape.fill(surface)
-                }
+                AppKitNeumorphicSurface(
+                    forcePressed: forcePressed,
+                    cornerRadius: cornerRadius,
+                    shadowRadius: 7,
+                    distance: 5
+                )
             }
-            .clipShape(shape)
-            .shadow(
-                color: isPressed ? .clear : highlight,
-                radius: 7,
-                x: -5,
-                y: -5
-            )
-            .shadow(
-                color: isPressed ? .clear : shadow,
-                radius: 7,
-                x: 5,
-                y: 5
-            )
-            .foregroundStyle(isPressed ? .secondary : .primary)
-            .opacity(isEnabled || isPressed ? 1 : 0.46)
-            .animation(.easeOut(duration: 0), value: isPressed)
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .foregroundStyle(forcePressed ? .secondary : .primary)
+            .opacity(isEnabled || forcePressed ? 1 : 0.46)
     }
 }
 
@@ -96,31 +73,37 @@ struct NeumorphicPressSurfaceModifier: ViewModifier {
 
         content
             .background {
-                if isPressed {
-                    shape.fill(
-                        surface
-                            .shadow(.inner(color: shadow.opacity(0.95), radius: 5, x: 4, y: 4))
-                            .shadow(.inner(color: highlight, radius: 5, x: -4, y: -4))
-                    )
-                } else {
-                    shape.fill(surface)
+                ZStack {
+                    shape
+                        .fill(surface)
+                        .shadow(
+                            color: highlight.opacity(strength),
+                            radius: shadowRadius,
+                            x: -distance,
+                            y: -distance
+                        )
+                        .shadow(
+                            color: shadow.opacity(strength),
+                            radius: shadowRadius,
+                            x: distance,
+                            y: distance
+                        )
+                        .opacity(isPressed ? 0 : 1)
+
+                    shape
+                        .fill(
+                            surface
+                                .shadow(.inner(color: shadow.opacity(0.95), radius: 5, x: 4, y: 4))
+                                .shadow(.inner(color: highlight, radius: 5, x: -4, y: -4))
+                        )
+                        .opacity(isPressed ? 1 : 0)
                 }
             }
-            .clipShape(shape)
-            .shadow(
-                color: isPressed ? .clear : highlight.opacity(strength),
-                radius: shadowRadius,
-                x: -distance,
-                y: -distance
-            )
-            .shadow(
-                color: isPressed ? .clear : shadow.opacity(strength),
-                radius: shadowRadius,
-                x: distance,
-                y: distance
-            )
+            .contentShape(shape)
             .foregroundStyle(isPressed ? .secondary : .primary)
-            .animation(.easeOut(duration: 0), value: isPressed)
+            .transaction { transaction in
+                transaction.animation = nil
+            }
     }
 }
 

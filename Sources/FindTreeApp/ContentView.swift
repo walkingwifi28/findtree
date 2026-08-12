@@ -9,7 +9,6 @@ private enum AppVisualStyle: String {
 struct ContentView: View {
     @StateObject private var model = AppModel()
     @Environment(\.colorScheme) private var colorScheme
-    @State private var isNeumorphicOptionsMenuPresented = false
     @AppStorage("findtree.visualStyle") private var visualStyleRawValue = AppVisualStyle.neumorphism.rawValue
 
     private let neumorphicHorizontalInset: CGFloat = 12
@@ -26,9 +25,6 @@ struct ContentView: View {
                 if visualStyleRawValue == "neumorphic" {
                     visualStyleRawValue = AppVisualStyle.neumorphism.rawValue
                 }
-            }
-            .onChange(of: visualStyleRawValue) { _, _ in
-                isNeumorphicOptionsMenuPresented = false
             }
             .background {
                 WindowAppearanceConfigurator(
@@ -198,17 +194,14 @@ struct ContentView: View {
                     .frame(width: 16, height: 17)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 9)
-                    .neumorphicPressSurface(
-                        isPressed: isNeumorphicOptionsMenuPresented,
-                        cornerRadius: 12,
-                        shadowRadius: 7,
-                        distance: 5,
-                        strength: 1
-                    )
-                    .allowsHitTesting(false)
-            }
-            .background {
-                MenuTrackingStateMonitor(isPresented: $isNeumorphicOptionsMenuPresented)
+                    .background {
+                        AppKitNeumorphicSurface(
+                            tracksOptionsMenu: true,
+                            cornerRadius: 12,
+                            shadowRadius: 7,
+                            distance: 5
+                        )
+                    }
                     .allowsHitTesting(false)
             }
             .accessibilityLabel("Options")
