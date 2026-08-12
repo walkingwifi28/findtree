@@ -1,8 +1,8 @@
 cask "findtree" do
-  version "0.1.1"
-  sha256 "12f2b0cefb05cc87adb1ff8f3cf2c8fd588ea040f418fccb33f8682586c6473f"
+  version "0.1.2"
+  sha256 "adb251c15f12ae4d422a125f592b9dab9175f1dd1d464b9ef7bc183f34cd80ef"
 
-  url "https://github.com/walkingwifi28/findtree/releases/download/v0.1.1/FindTree-0.1.1-arm64.dmg"
+  url "https://github.com/walkingwifi28/findtree/releases/download/v0.1.2/FindTree-0.1.2-arm64.dmg"
   name "FindTree"
   desc "Fast macOS disk-usage analyzer with a hierarchical treemap"
   homepage "https://github.com/walkingwifi28/findtree"
