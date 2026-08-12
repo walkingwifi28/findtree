@@ -75,7 +75,7 @@ struct NeumorphicButtonStyle: ButtonStyle {
             )
             .foregroundStyle(isPressed ? .secondary : .primary)
             .opacity(isEnabled || isPressed ? 1 : 0.46)
-            .animation(.easeOut(duration: 0.12), value: isPressed)
+            .animation(.easeOut(duration: 0), value: isPressed)
     }
 }
 
@@ -120,7 +120,7 @@ struct NeumorphicPressSurfaceModifier: ViewModifier {
                 y: distance
             )
             .foregroundStyle(isPressed ? .secondary : .primary)
-            .animation(.easeOut(duration: 0.12), value: isPressed)
+            .animation(.easeOut(duration: 0), value: isPressed)
     }
 }
 
