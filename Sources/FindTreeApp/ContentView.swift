@@ -96,6 +96,10 @@ struct ContentView: View {
                 Button(action: model.chooseRootFolder) {
                     Label("Folder", systemImage: "folder")
                 }
+                .disabled(model.isScanning)
+                .background {
+                    DisabledCursorRegion(isDisabled: model.isScanning)
+                }
 
                 rootPathLabel
 
@@ -109,7 +113,11 @@ struct ContentView: View {
                 Button(action: model.chooseRootFolder) {
                     Label("Folder", systemImage: "folder")
                 }
+                .disabled(model.isScanning)
                 .buttonStyle(NeumorphicButtonStyle())
+                .background {
+                    DisabledCursorRegion(isDisabled: model.isScanning)
+                }
 
                 rootPathLabel
                     .padding(.horizontal, 4)
