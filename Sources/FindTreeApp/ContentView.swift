@@ -12,6 +12,7 @@ struct ContentView: View {
     @AppStorage("findtree.visualStyle") private var visualStyleRawValue = AppVisualStyle.neumorphism.rawValue
 
     private let neumorphicHorizontalInset: CGFloat = 12
+    private let neumorphicScanButtonContentWidth: CGFloat = 72
 
     private var visualStyle: AppVisualStyle {
         get { AppVisualStyle(rawValue: visualStyleRawValue) ?? .neumorphism }
@@ -139,17 +140,22 @@ struct ContentView: View {
 
     private var scanButton: some View {
         Button(action: model.scan) {
-            if model.isScanning {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("\(model.scanProgressPercent ?? 0)%")
-                        .monospacedDigit()
+            Group {
+                if model.isScanning {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("\(model.scanProgressPercent ?? 0)%")
+                            .monospacedDigit()
+                    }
+                } else {
+                    Label(model.snapshot == nil ? "Scan" : "Rescan", systemImage: "arrow.clockwise")
                 }
-                .frame(minWidth: 62)
-            } else {
-                Label(model.snapshot == nil ? "Scan" : "Rescan", systemImage: "arrow.clockwise")
             }
+            .lineLimit(1)
+            .frame(
+                width: visualStyle == .neumorphism ? neumorphicScanButtonContentWidth : nil
+            )
         }
         .disabled(model.isScanning)
         .keyboardShortcut("r", modifiers: [.command])
