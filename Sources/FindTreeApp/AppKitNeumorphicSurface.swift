@@ -6,20 +6,17 @@ import SwiftUI
 /// SwiftUI state/update/render round trip for the visual pressed state.
 struct AppKitNeumorphicSurface: NSViewRepresentable {
     let forcePressed: Bool
-    let tracksOptionsMenu: Bool
     let cornerRadius: CGFloat
     let shadowRadius: CGFloat
     let distance: CGFloat
 
     init(
         forcePressed: Bool = false,
-        tracksOptionsMenu: Bool = false,
         cornerRadius: CGFloat = 12,
         shadowRadius: CGFloat = 7,
         distance: CGFloat = 5
     ) {
         self.forcePressed = forcePressed
-        self.tracksOptionsMenu = tracksOptionsMenu
         self.cornerRadius = cornerRadius
         self.shadowRadius = shadowRadius
         self.distance = distance
@@ -31,7 +28,6 @@ struct AppKitNeumorphicSurface: NSViewRepresentable {
         view.shadowRadius = shadowRadius
         view.shadowDistance = distance
         view.forcePressed = forcePressed
-        view.tracksOptionsMenu = tracksOptionsMenu
         view.startMonitoring()
         return view
     }
@@ -40,7 +36,6 @@ struct AppKitNeumorphicSurface: NSViewRepresentable {
         nsView.cornerRadius = cornerRadius
         nsView.shadowRadius = shadowRadius
         nsView.shadowDistance = distance
-        nsView.tracksOptionsMenu = tracksOptionsMenu
         nsView.setForcePressed(forcePressed)
     }
 
@@ -54,7 +49,6 @@ final class NeumorphicSurfaceView: NSView {
     var cornerRadius: CGFloat = 12 { didSet { invalidateImages() } }
     var shadowRadius: CGFloat = 7 { didSet { invalidateImages() } }
     var shadowDistance: CGFloat = 5 { didSet { invalidateImages() } }
-    var tracksOptionsMenu = false
     var forcePressed = false
 
     private let imageLayer = CALayer()
@@ -63,12 +57,8 @@ final class NeumorphicSurfaceView: NSView {
     private var lastRenderSize: CGSize = .zero
     private var lastDarkMode = false
     private var physicalPressed = false
-    private var menuTracking = false
     private var lastAppliedPressed: Bool?
     private var eventMonitor: Any?
-    private var optionsEventTap: CFMachPort?
-    private var optionsEventTapSource: CFRunLoopSource?
-    private var optionsEventTapContext: NeumorphicOptionsEventTapContext?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -119,22 +109,6 @@ final class NeumorphicSurfaceView: NSView {
             return event
         }
 
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(menuDidBeginTracking(_:)),
-            name: NSMenu.didBeginTrackingNotification,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(menuDidEndTracking(_:)),
-            name: NSMenu.didEndTrackingNotification,
-            object: nil
-        )
-
-        if tracksOptionsMenu {
-            startOptionsEventTap()
-        }
     }
 
     func stopMonitoring() {
@@ -142,108 +116,8 @@ final class NeumorphicSurfaceView: NSView {
             NSEvent.removeMonitor(eventMonitor)
             self.eventMonitor = nil
         }
-        NotificationCenter.default.removeObserver(
-            self,
-            name: NSMenu.didBeginTrackingNotification,
-            object: nil
-        )
-        NotificationCenter.default.removeObserver(
-            self,
-            name: NSMenu.didEndTrackingNotification,
-            object: nil
-        )
-        stopOptionsEventTap()
     }
 
-    private func startOptionsEventTap() {
-        guard optionsEventTap == nil else { return }
-
-        let context = NeumorphicOptionsEventTapContext(view: self)
-        let mask = CGEventMask(1) << CGEventType.leftMouseDown.rawValue
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: mask,
-            callback: neumorphicOptionsEventTapCallback,
-            userInfo: Unmanaged.passUnretained(context).toOpaque()
-        ) else { return }
-
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        optionsEventTapContext = context
-        optionsEventTap = tap
-        optionsEventTapSource = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-    }
-
-    private func stopOptionsEventTap() {
-        if let source = optionsEventTapSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-            optionsEventTapSource = nil
-        }
-        if let tap = optionsEventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            CFMachPortInvalidate(tap)
-            optionsEventTap = nil
-        }
-        optionsEventTapContext = nil
-    }
-
-    fileprivate func handleOptionsGlobalMouseDown(at screenPoint: CGPoint) {
-        guard tracksOptionsMenu, menuTracking else { return }
-        guard !isInsideOwnMenuWindow(screenPoint) else { return }
-
-        // NSMenu consumes outside clicks inside its nested tracking loop, so the
-        // normal NSEvent local monitor does not see this mouse-down. Restore the
-        // raised surface immediately instead of waiting for didEndTracking.
-        menuTracking = false
-        physicalPressed = false
-        applyPressedAppearance()
-    }
-
-    private func isInsideOwnMenuWindow(_ screenPoint: CGPoint) -> Bool {
-        guard let windows = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
-            kCGNullWindowID
-        ) as? [[String: Any]] else { return false }
-
-        let ownerPID = Int(ProcessInfo.processInfo.processIdentifier)
-        return windows.contains { windowInfo in
-            guard let pid = windowInfo[kCGWindowOwnerPID as String] as? Int,
-                  pid == ownerPID,
-                  let layer = windowInfo[kCGWindowLayer as String] as? Int,
-                  layer == 3,
-                  let boundsValue = windowInfo[kCGWindowBounds as String]
-            else { return false }
-
-            let boundsDictionary = boundsValue as! CFDictionary
-            guard let bounds = CGRect(dictionaryRepresentation: boundsDictionary) else {
-                return false
-            }
-
-            // A small tolerance avoids treating a click on the menu border as an
-            // outside dismissal. Submenus are also AppKit layer-3 windows.
-            return bounds.insetBy(dx: -2, dy: -2).contains(screenPoint)
-        }
-    }
-
-    @objc private func menuDidBeginTracking(_ notification: Notification) {
-        guard tracksOptionsMenu,
-              let menu = notification.object as? NSMenu,
-              isOptionsMenu(menu) else { return }
-        menuTracking = true
-        applyPressedAppearance()
-    }
-
-    @objc private func menuDidEndTracking(_ notification: Notification) {
-        guard tracksOptionsMenu,
-              let menu = notification.object as? NSMenu,
-              isOptionsMenu(menu) else { return }
-        menuTracking = false
-        physicalPressed = false
-        applyPressedAppearance()
-    }
 
     private func handleMouseEvent(_ event: NSEvent) {
         guard let window, event.window === window else {
@@ -280,7 +154,7 @@ final class NeumorphicSurfaceView: NSView {
 
     private func applyPressedAppearance() {
         ensureImages()
-        let pressed = forcePressed || physicalPressed || menuTracking
+        let pressed = forcePressed || physicalPressed
         let target = pressed ? insetImage : raisedImage
         guard target != nil, lastAppliedPressed != pressed else { return }
         lastAppliedPressed = pressed
@@ -439,43 +313,4 @@ final class NeumorphicSurfaceView: NSView {
         context.restoreGState()
     }
 
-    private func isOptionsMenu(_ menu: NSMenu) -> Bool {
-        menu.items.contains { item in
-            if item.title == "Appearance" { return true }
-            if let submenu = item.submenu, isOptionsMenu(submenu) { return true }
-            return false
-        }
-    }
-}
-
-
-private final class NeumorphicOptionsEventTapContext: @unchecked Sendable {
-    weak var view: NeumorphicSurfaceView?
-
-    init(view: NeumorphicSurfaceView) {
-        self.view = view
-    }
-}
-
-private let neumorphicOptionsEventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
-    guard type == .leftMouseDown, let userInfo else {
-        return Unmanaged.passUnretained(event)
-    }
-
-    let context = Unmanaged<NeumorphicOptionsEventTapContext>
-        .fromOpaque(userInfo)
-        .takeUnretainedValue()
-    let screenPoint = event.location
-
-    if Thread.isMainThread {
-        MainActor.assumeIsolated {
-            context.view?.handleOptionsGlobalMouseDown(at: screenPoint)
-        }
-    } else {
-        Task { @MainActor [weak context] in
-            context?.view?.handleOptionsGlobalMouseDown(at: screenPoint)
-        }
-    }
-
-    return Unmanaged.passUnretained(event)
 }

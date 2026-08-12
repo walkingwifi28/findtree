@@ -6,13 +6,20 @@ private enum AppVisualStyle: String {
     case neumorphism
 }
 
+private enum AppScreen {
+    case main
+    case settings
+}
+
 struct ContentView: View {
     @StateObject private var model = AppModel()
+    @State private var currentScreen = AppScreen.main
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("findtree.visualStyle") private var visualStyleRawValue = AppVisualStyle.neumorphism.rawValue
 
     private let neumorphicHorizontalInset: CGFloat = 12
     private let neumorphicScanButtonContentWidth: CGFloat = 72
+    private let settingsContentMaxWidth: CGFloat = 560
 
     private var visualStyle: AppVisualStyle {
         get { AppVisualStyle(rawValue: visualStyleRawValue) ?? .neumorphism }
@@ -20,7 +27,14 @@ struct ContentView: View {
     }
 
     var body: some View {
-        mainContent
+        Group {
+            switch currentScreen {
+            case .main:
+                mainContent
+            case .settings:
+                settingsContent
+            }
+        }
             .frame(minWidth: 980, minHeight: 680)
             .onAppear {
                 if visualStyleRawValue == "neumorphic" {
@@ -105,7 +119,7 @@ struct ContentView: View {
 
                 scanButton
 
-                optionsMenu
+                settingsButton
             }
             .padding(12)
         case .neumorphism:
@@ -130,7 +144,7 @@ struct ContentView: View {
                         )
                     )
 
-                optionsMenu
+                settingsButton
             }
             .padding(.horizontal, neumorphicHorizontalInset)
             .padding(.top, 12)
@@ -170,13 +184,13 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private var optionsMenu: some View {
+    private var settingsButton: some View {
         switch visualStyle {
         case .standard:
-            Menu {
-                appearancePicker
+            Button {
+                currentScreen = .settings
             } label: {
-                Image(systemName: "ellipsis.circle")
+                Image(systemName: "gearshape")
                     .frame(width: 16, height: 18)
                     .frame(width: 36, height: 26)
                     .background(
@@ -185,49 +199,192 @@ struct ContentView: View {
                     )
                     .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .menuIndicator(.hidden)
             .buttonStyle(.plain)
-            .accessibilityLabel("Options")
+            .accessibilityLabel("Settings")
+
         case .neumorphism:
-            Menu {
-                appearancePicker
+            Button {
+                currentScreen = .settings
             } label: {
-                Image(systemName: "ellipsis")
+                Image(systemName: "gearshape")
                     .frame(width: 16, height: 17)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 9)
-                    // Keep the native Menu label alive as the real hit target.
-                    // A fully transparent label can stop receiving clicks on macOS.
-                    .opacity(0.001)
-                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            .menuIndicator(.hidden)
-            .buttonStyle(.plain)
-            .overlay {
-                Image(systemName: "ellipsis")
-                    .frame(width: 16, height: 17)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 9)
-                    .background {
-                        AppKitNeumorphicSurface(
-                            tracksOptionsMenu: true,
-                            cornerRadius: 12,
-                            shadowRadius: 7,
-                            distance: 5
-                        )
-                    }
-                    .allowsHitTesting(false)
-            }
-            .accessibilityLabel("Options")
+            .buttonStyle(
+                NeumorphicButtonStyle(
+                    horizontalPadding: 10,
+                    verticalPadding: 9
+                )
+            )
+            .accessibilityLabel("Settings")
         }
     }
 
-    private var appearancePicker: some View {
-        Picker("Appearance", selection: $visualStyleRawValue) {
-            Text("Standard")
-                .tag(AppVisualStyle.standard.rawValue)
-            Text("Neumorphism")
-                .tag(AppVisualStyle.neumorphism.rawValue)
+    private var settingsContent: some View {
+        ZStack {
+            NeumorphicTheme.surface(for: colorScheme)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                settingsHeader
+
+                if visualStyle == .standard {
+                    Divider()
+                }
+
+                ScrollView {
+                    VStack(spacing: visualStyle == .standard ? 16 : 32) {
+                        SettingsSection(
+                            title: "Appearance",
+                            showsBackground: visualStyle == .standard
+                        ) {
+                            HStack(spacing: 12) {
+                                Text("UI")
+                                    .foregroundStyle(.secondary)
+                                Spacer(minLength: 12)
+                                appearanceControl
+                                    .frame(width: 220, alignment: .trailing)
+                            }
+                        }
+
+                        SettingsSection(
+                            title: "About",
+                            showsBackground: visualStyle == .standard
+                        ) {
+                            VStack(spacing: 12) {
+                                HStack(spacing: 12) {
+                                    Text("Creator")
+                                        .foregroundStyle(.secondary)
+                                    Spacer(minLength: 12)
+                                    Text("@walkingwifi28")
+                                        .frame(width: 220, alignment: .trailing)
+                                }
+
+                                HStack(spacing: 12) {
+                                    Text("Version")
+                                        .foregroundStyle(.secondary)
+                                    Spacer(minLength: 12)
+                                    Text(appVersion)
+                                        .monospacedDigit()
+                                        .frame(width: 220, alignment: .trailing)
+                                }
+                            }
+                        }
+                    }
+                    .padding(visualStyle == .standard ? 20 : neumorphicHorizontalInset)
+                    .frame(maxWidth: settingsContentMaxWidth)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var settingsHeader: some View {
+        switch visualStyle {
+        case .standard:
+            HStack(spacing: 12) {
+                Button {
+                    currentScreen = .main
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+
+                Text("Settings")
+                    .font(.title2.weight(.semibold))
+
+                Spacer()
+            }
+            .padding(12)
+
+        case .neumorphism:
+            HStack(spacing: 14) {
+                Button {
+                    currentScreen = .main
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .buttonStyle(
+                    NeumorphicButtonStyle(
+                        horizontalPadding: 12,
+                        verticalPadding: 8
+                    )
+                )
+
+                Text("Settings")
+                    .font(.title2.weight(.semibold))
+
+                Spacer()
+            }
+            .padding(.horizontal, neumorphicHorizontalInset)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
+        }
+    }
+
+    private var appVersion: String {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String
+        return "v\(version ?? "0.1.1")"
+    }
+
+    @ViewBuilder
+    private var appearanceControl: some View {
+        switch visualStyle {
+        case .standard:
+            Picker("Appearance", selection: $visualStyleRawValue) {
+                Text("Standard")
+                    .tag(AppVisualStyle.standard.rawValue)
+                Text("Neumorphism")
+                    .tag(AppVisualStyle.neumorphism.rawValue)
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(width: 220, alignment: .trailing)
+
+        case .neumorphism:
+            Menu {
+                Button {
+                    visualStyleRawValue = AppVisualStyle.standard.rawValue
+                } label: {
+                    if visualStyle == .standard {
+                        Label("Standard", systemImage: "checkmark")
+                    } else {
+                        Text("Standard")
+                    }
+                }
+
+                Button {
+                    visualStyleRawValue = AppVisualStyle.neumorphism.rawValue
+                } label: {
+                    if visualStyle == .neumorphism {
+                        Label("Neumorphism", systemImage: "checkmark")
+                    } else {
+                        Text("Neumorphism")
+                    }
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Text(visualStyle == .standard ? "Standard" : "Neumorphism")
+                    Spacer(minLength: 12)
+                    Image(systemName: "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: 180)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .neumorphicRaised(
+                    cornerRadius: 12,
+                    shadowRadius: 7,
+                    distance: 5,
+                    strength: 1
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
+            .fixedSize()
         }
     }
 
@@ -310,6 +467,46 @@ struct ContentView: View {
             get: { model.lastError != nil },
             set: { if !$0 { model.lastError = nil } }
         )
+    }
+}
+
+private struct SettingsSection<Content: View>: View {
+    let title: String
+    var inline = false
+    var showsBackground = true
+    @ViewBuilder let content: () -> Content
+
+    @ViewBuilder
+    var body: some View {
+        Group {
+            if inline {
+                HStack(spacing: 12) {
+                    Text(title)
+                        .font(.headline)
+
+                    Spacer(minLength: 12)
+
+                    content()
+                        .frame(width: 220, alignment: .trailing)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(title)
+                        .font(.headline)
+
+                    content()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            if showsBackground {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.quaternary.opacity(0.28))
+            }
+        }
     }
 }
 
