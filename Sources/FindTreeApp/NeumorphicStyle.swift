@@ -36,42 +36,91 @@ struct NeumorphicButtonStyle: ButtonStyle {
     var cornerRadius: CGFloat = 12
     var horizontalPadding: CGFloat = 14
     var verticalPadding: CGFloat = 9
+    var forcePressed: Bool = false
+    var preserveOpacityWhenForcedPressed: Bool = false
 
     func makeBody(configuration: Configuration) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let surface = NeumorphicTheme.surface(for: colorScheme)
         let highlight = NeumorphicTheme.highlight(for: colorScheme)
         let shadow = NeumorphicTheme.shadow(for: colorScheme)
+        let isPressed = configuration.isPressed || forcePressed
 
         configuration.label
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
-            .background(shape.fill(surface))
+            .background {
+                if isPressed {
+                    shape.fill(
+                        surface
+                            .shadow(.inner(color: shadow.opacity(0.95), radius: 5, x: 4, y: 4))
+                            .shadow(.inner(color: highlight, radius: 5, x: -4, y: -4))
+                    )
+                } else {
+                    shape.fill(surface)
+                }
+            }
             .clipShape(shape)
             .shadow(
-                color: configuration.isPressed ? .clear : highlight,
+                color: isPressed ? .clear : highlight,
                 radius: 7,
                 x: -5,
                 y: -5
             )
             .shadow(
-                color: configuration.isPressed ? .clear : shadow,
+                color: isPressed ? .clear : shadow,
                 radius: 7,
                 x: 5,
                 y: 5
             )
-            .overlay {
-                if configuration.isPressed {
-                    NeumorphicInsetOverlay(
-                        cornerRadius: cornerRadius,
-                        colorScheme: colorScheme,
-                        strength: 0.82
+            .foregroundStyle(isPressed ? .secondary : .primary)
+            .opacity(isEnabled || isPressed ? 1 : 0.46)
+            .animation(.easeOut(duration: 0.12), value: isPressed)
+    }
+}
+
+struct NeumorphicPressSurfaceModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let isPressed: Bool
+    let cornerRadius: CGFloat
+    let shadowRadius: CGFloat
+    let distance: CGFloat
+    let strength: Double
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let surface = NeumorphicTheme.surface(for: colorScheme)
+        let highlight = NeumorphicTheme.highlight(for: colorScheme)
+        let shadow = NeumorphicTheme.shadow(for: colorScheme)
+
+        content
+            .background {
+                if isPressed {
+                    shape.fill(
+                        surface
+                            .shadow(.inner(color: shadow.opacity(0.95), radius: 5, x: 4, y: 4))
+                            .shadow(.inner(color: highlight, radius: 5, x: -4, y: -4))
                     )
+                } else {
+                    shape.fill(surface)
                 }
             }
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .opacity(isEnabled ? 1 : 0.46)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .clipShape(shape)
+            .shadow(
+                color: isPressed ? .clear : highlight.opacity(strength),
+                radius: shadowRadius,
+                x: -distance,
+                y: -distance
+            )
+            .shadow(
+                color: isPressed ? .clear : shadow.opacity(strength),
+                radius: shadowRadius,
+                x: distance,
+                y: distance
+            )
+            .foregroundStyle(isPressed ? .secondary : .primary)
+            .animation(.easeOut(duration: 0.12), value: isPressed)
     }
 }
 
@@ -152,6 +201,24 @@ struct NeumorphicInsetOverlay: View {
 }
 
 extension View {
+    func neumorphicPressSurface(
+        isPressed: Bool,
+        cornerRadius: CGFloat = 16,
+        shadowRadius: CGFloat = 8,
+        distance: CGFloat = 6,
+        strength: Double = 1
+    ) -> some View {
+        modifier(
+            NeumorphicPressSurfaceModifier(
+                isPressed: isPressed,
+                cornerRadius: cornerRadius,
+                shadowRadius: shadowRadius,
+                distance: distance,
+                strength: strength
+            )
+        )
+    }
+
     func neumorphicRaised(
         cornerRadius: CGFloat = 16,
         shadowRadius: CGFloat = 8,
