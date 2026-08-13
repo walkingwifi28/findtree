@@ -13,6 +13,7 @@ private enum AppScreen {
 
 struct ContentView: View {
     @StateObject private var model = AppModel()
+    @StateObject private var updateManager = UpdateManager()
     @State private var currentScreen = AppScreen.main
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("findtree.visualStyle") private var visualStyleRawValue = AppVisualStyle.neumorphism.rawValue
@@ -267,6 +268,21 @@ struct ContentView: View {
                                         .monospacedDigit()
                                         .frame(width: 220, alignment: .trailing)
                                 }
+
+                                HStack(spacing: 8) {
+                                    Spacer(minLength: 0)
+
+                                    if let statusMessage = updateManager.statusMessage {
+                                        Text(statusMessage)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                            .multilineTextAlignment(.trailing)
+                                            .fixedSize(horizontal: true, vertical: false)
+                                    }
+
+                                    updateButton
+                                }
                             }
                         }
                     }
@@ -326,6 +342,39 @@ struct ContentView: View {
             forInfoDictionaryKey: "CFBundleShortVersionString"
         ) as? String
         return "v\(version ?? "0.1.1")"
+    }
+
+    @ViewBuilder
+    private var updateButton: some View {
+        let label = HStack(spacing: 7) {
+            if updateManager.isBusy {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Text(updateManager.buttonTitle)
+                .lineLimit(1)
+        }
+
+        switch visualStyle {
+        case .standard:
+            Button(action: updateManager.performPrimaryAction) {
+                label
+            }
+            .buttonStyle(.bordered)
+            .disabled(updateManager.isBusy)
+
+        case .neumorphism:
+            Button(action: updateManager.performPrimaryAction) {
+                label
+            }
+            .buttonStyle(
+                NeumorphicButtonStyle(
+                    horizontalPadding: 14,
+                    verticalPadding: 8
+                )
+            )
+            .disabled(updateManager.isBusy)
+        }
     }
 
     @ViewBuilder
