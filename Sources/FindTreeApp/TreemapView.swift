@@ -17,6 +17,8 @@ struct TreemapView: View {
     var legendLeadingPadding: CGFloat = 2
     var legendTrailingPadding: CGFloat = 2
 
+    @State private var selectedDirectoryID: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             TreemapColorLegend(
@@ -39,8 +41,19 @@ struct TreemapView: View {
                     ForEach(layouts) { layout in
                         TreemapTile(
                             layout: layout,
-                            onMoveToTrash: onMoveToTrash
+                            onMoveToTrash: onMoveToTrash,
+                            onSelectDirectory: { selectedDirectoryID = $0 }
                         )
+                    }
+
+                    if let selectedDirectoryID,
+                       let selectedLayout = layouts.first(where: { layout in
+                           guard case .directory = layout.entry else { return false }
+                           return layout.entry.id == selectedDirectoryID
+                       }) {
+                        TreemapSelectionBorder(layout: selectedLayout)
+                            .zIndex(10_000)
+                            .allowsHitTesting(false)
                     }
                 }
                 .frame(width: bounds.width, height: bounds.height, alignment: .topLeading)
@@ -150,10 +163,14 @@ private enum TreemapEntry: Identifiable {
 private struct TreemapTile: View {
     let layout: TreemapLayoutItem
     let onMoveToTrash: (URL) -> Void
+    let onSelectDirectory: (String) -> Void
 
     var body: some View {
         tileContent
         .frame(width: tileWidth, height: tileHeight)
+        // Non-terminal folders are transparent, so make the entire folder tile
+        // participate in hit testing instead of only its label and border.
+        .contentShape(Rectangle())
         .offset(x: layout.rect.minX + layout.gap, y: layout.rect.minY + layout.gap)
         .zIndex(Double(layout.depth))
         .onContinuousHover(coordinateSpace: .local) { phase in
@@ -169,6 +186,11 @@ private struct TreemapTile: View {
             }
         }
         .help(helpText)
+        .onTapGesture {
+            guard case .directory = layout.entry else { return }
+            FastTreemapTooltipController.shared.hide()
+            onSelectDirectory(layout.entry.id)
+        }
         .contextMenu {
             if let finderURL = layout.entry.finderURL {
                 FinderContextMenu(url: finderURL, onMoveToTrash: onMoveToTrash)
@@ -248,6 +270,21 @@ private struct TreemapTile: View {
     private var helpText: String {
         layout.entry.path + "\n" + formatBytes(layout.entry.allocatedBytes)
     }
+}
+
+private struct TreemapSelectionBorder: View {
+    let layout: TreemapLayoutItem
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .strokeBorder(TreemapColor.selectionBorderColor, lineWidth: 2.5)
+            .frame(width: tileWidth, height: tileHeight)
+            .offset(x: layout.rect.minX + layout.gap, y: layout.rect.minY + layout.gap)
+    }
+
+    private var tileWidth: CGFloat { max(layout.rect.width - layout.gap * 2, 0) }
+    private var tileHeight: CGFloat { max(layout.rect.height - layout.gap * 2, 0) }
+    private var cornerRadius: CGFloat { layout.depth <= 1 ? 4 : 2 }
 }
 
 @MainActor
@@ -461,6 +498,17 @@ private enum TreemapFileCategory: CaseIterable {
 }
 
 private enum TreemapColor {
+    static var selectionBorderColor: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let match = appearance.bestMatch(from: [.darkAqua, .aqua])
+            if match == .darkAqua {
+                // Windows 11-style bright blue accent for dark surfaces.
+                return NSColor(srgbRed: 96.0 / 255.0, green: 205.0 / 255.0, blue: 255.0 / 255.0, alpha: 1.0)
+            }
+            return NSColor(srgbRed: 0.0 / 255.0, green: 120.0 / 255.0, blue: 212.0 / 255.0, alpha: 1.0)
+        })
+    }
+
     static func legendColor(for category: TreemapFileCategory) -> Color {
         systemColor(for: category)
     }
